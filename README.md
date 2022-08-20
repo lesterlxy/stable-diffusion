@@ -1,3 +1,5 @@
+`git clone https://github.com/crowsonkb/k-diffusion.git src/k-diffusion` and install
+
 # Update: Added optimized_img2img.py
 
 This code can now generate a 512x512 image from prior images using less than 4Gb of RAM (in less than 20 seconds on RTX 2060)
