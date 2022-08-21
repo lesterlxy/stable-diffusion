@@ -1,23 +1,22 @@
-import argparse, os, sys, glob
-import torch
+import argparse
+import os
+from contextlib import nullcontext
+from itertools import islice
+
+import accelerate
+import k_diffusion as K
 import numpy as np
+import torch
+import torch.nn as nn
+from einops import rearrange
+from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 from PIL import Image
-from tqdm import tqdm, trange
-from itertools import islice
-from einops import rearrange
-from torchvision.utils import make_grid
-import time
 from pytorch_lightning import seed_everything
 from torch import autocast
-from contextlib import contextmanager, nullcontext
+from torchvision.utils import make_grid
+from tqdm import tqdm, trange
 
-from ldm.util import instantiate_from_config
-from ldm.models.diffusion.ddim import DDIMSampler
-from ldm.models.diffusion.plms import PLMSSampler
-import k_diffusion as K
-import torch.nn as nn
-import accelerate
 
 def chunk(it, size):
     it = iter(it)
@@ -43,6 +42,7 @@ def load_model_from_config(config, ckpt, verbose=False):
     model.eval()
     return model
 
+
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -55,6 +55,7 @@ class CFGDenoiser(nn.Module):
         uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
         return uncond + (cond - uncond) * cond_scale
 
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -63,44 +64,44 @@ def main():
         type=str,
         nargs="?",
         default="a painting of a virus monster playing guitar",
-        help="the prompt to render"
+        help="the prompt to render",
     )
     parser.add_argument(
         "--outdir",
         type=str,
         nargs="?",
         help="dir to write results to",
-        default="outputs/txt2img-samples"
+        default="outputs/txt2img-samples",
     )
     parser.add_argument(
         "--skip_grid",
-        action='store_true',
+        action="store_true",
         help="do not save a grid, only individual samples. Helpful when evaluating lots of samples",
     )
     parser.add_argument(
         "--skip_save",
-        action='store_true',
+        action="store_true",
         help="do not save individual samples. For speed measurements.",
     )
     parser.add_argument(
         "--ddim_steps",
         type=int,
-        default=100,
+        default=50,
         help="number of ddim sampling steps",
     )
     parser.add_argument(
         "--plms",
-        action='store_true',
+        action="store_true",
         help="use plms sampling",
     )
     parser.add_argument(
         "--laion400m",
-        action='store_true',
+        action="store_true",
         help="uses the LAION400M model",
     )
     parser.add_argument(
         "--fixed_code",
-        action='store_true',
+        action="store_true",
         help="if enabled, uses the same starting code across samples ",
     )
     parser.add_argument(
@@ -126,6 +127,21 @@ def main():
         type=int,
         default=576,
         help="image width, in pixel space",
+    )
+    parser.add_argument(
+        "--square",
+        action="store_true",
+        help="size preset",
+    )
+    parser.add_argument(
+        "--portrait",
+        action="store_true",
+        help="size preset",
+    )
+    parser.add_argument(
+        "--landscape",
+        action="store_true",
+        help="size preset",
     )
     parser.add_argument(
         "--C",
@@ -185,9 +201,45 @@ def main():
         type=str,
         help="evaluate at this precision",
         choices=["full", "autocast"],
-        default="autocast"
+        default="autocast",
     )
+    parser.add_argument(
+        "--four",
+        action="store_true",
+        help="grid",
+    )
+    parser.add_argument(
+        "--six",
+        action="store_true",
+        help="grid",
+    )
+    parser.add_argument(
+        "--nine",
+        action="store_true",
+        help="grid",
+    )
+
     opt = parser.parse_args()
+
+    if opt.square:
+        opt.H = 640
+        opt.W = 640
+    elif opt.portrait:
+        opt.H = 768
+        opt.W = 576
+    elif opt.landscape:
+        opt.H = 576
+        opt.W = 768
+
+    if opt.four:
+        opt.n_iter = 4
+        opt.n_rows = 2
+    elif opt.six:
+        opt.n_iter = 6
+        opt.n_rows = 3
+    elif opt.nine:
+        opt.n_iter = 9
+        opt.n_rows = 3
 
     if opt.laion400m:
         print("Falling back to LAION 400M model...")
@@ -203,7 +255,6 @@ def main():
     model = load_model_from_config(config, f"{opt.ckpt}")
     model = model.half()
     model_wrap = K.external.CompVisDenoiser(model)
-    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
@@ -229,15 +280,10 @@ def main():
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(outpath)) - 1
 
-    start_code = None
-    if opt.fixed_code:
-        start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
-
-    precision_scope = autocast if opt.precision=="autocast" else nullcontext
+    precision_scope = autocast if opt.precision == "autocast" else nullcontext
     with torch.no_grad():
         with precision_scope("cuda"):
             with model.ema_scope():
-                tic = time.time()
                 all_samples = list()
                 for n in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
@@ -249,19 +295,33 @@ def main():
                         c = model.get_learned_conditioning(prompts)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                         sigmas = model_wrap.get_sigmas(opt.ddim_steps)
-                        x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
+                        x = (
+                            torch.randn([opt.n_samples, *shape], device=device)
+                            * sigmas[0]
+                        )  # for GPU draw
                         model_wrap_cfg = CFGDenoiser(model_wrap)
-                        extra_args = {'cond': c, 'uncond': uc, 'cond_scale': opt.scale}
-                        samples_ddim = K.sampling.sample_lms(model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+                        extra_args = {"cond": c, "uncond": uc, "cond_scale": opt.scale}
+                        samples_ddim = K.sampling.sample_lms(
+                            model_wrap_cfg,
+                            x,
+                            sigmas,
+                            extra_args=extra_args,
+                            disable=not accelerator.is_main_process,
+                        )
 
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
-                        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                        x_samples_ddim = torch.clamp(
+                            (x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0
+                        )
 
                         if not opt.skip_save:
                             for x_sample in x_samples_ddim:
-                                x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                                x_sample = 255.0 * rearrange(
+                                    x_sample.cpu().numpy(), "c h w -> h w c"
+                                )
                                 Image.fromarray(x_sample.astype(np.uint8)).save(
-                                    os.path.join(sample_path, f"{base_count:05}.png"))
+                                    os.path.join(sample_path, f"{base_count:05}.png")
+                                )
                                 base_count += 1
 
                         if not opt.skip_grid:
@@ -270,18 +330,19 @@ def main():
                 if not opt.skip_grid:
                     # additionally, save as grid
                     grid = torch.stack(all_samples, 0)
-                    grid = rearrange(grid, 'n b c h w -> (n b) c h w')
+                    grid = rearrange(grid, "n b c h w -> (n b) c h w")
                     grid = make_grid(grid, nrow=n_rows)
 
                     # to image
-                    grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
+                    grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
+                    Image.fromarray(grid.astype(np.uint8)).save(
+                        os.path.join(outpath, f"grid-{grid_count:04}.png")
+                    )
                     grid_count += 1
 
-                toc = time.time()
-
-    print(f"Your samples are ready and waiting for you here: \n{outpath} \n"
-          f" \nEnjoy.")
+    print(
+        f"Your samples are ready and waiting for you here: \n{outpath} \n" f" \nEnjoy."
+    )
 
 
 if __name__ == "__main__":
