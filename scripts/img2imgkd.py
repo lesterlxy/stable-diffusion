@@ -1,14 +1,18 @@
+"""make variations of input image"""
+
 import argparse
 import os
+import time
 from contextlib import nullcontext
 from itertools import islice
 
 import accelerate
 import k_diffusion as K
 import numpy as np
+import PIL
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 from PIL import Image
@@ -44,6 +48,18 @@ def load_model_from_config(config, ckpt, verbose=False):
     return model
 
 
+def load_img(path):
+    image = Image.open(path).convert("RGB")
+    w, h = image.size
+    print(f"loaded input image of size ({w}, {h}) from {path}")
+    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    image = image.resize((w, h), resample=PIL.Image.LANCZOS)
+    image = np.array(image).astype(np.float32) / 255.0
+    image = image[None].transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image).half()
+    return 2.0 * image - 1.0
+
+
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -70,30 +86,38 @@ def main():
         default="a painting of a virus monster playing guitar",
         help="the prompt to render",
     )
+
+    parser.add_argument(
+        "-I", "--init-img", type=str, nargs="?", help="path to the input image"
+    )
+
     parser.add_argument(
         "--outdir",
         type=str,
         nargs="?",
         help="dir to write results to",
-        default="outputs/txt2img-samples",
+        default="outputs/img2img-samples",
     )
+
     parser.add_argument(
         "--skip_grid",
         action="store_true",
         help="do not save a grid, only individual samples. Helpful when evaluating lots of samples",
     )
+
     parser.add_argument(
         "--skip_save",
         action="store_true",
-        help="do not save individual samples. For speed measurements.",
+        help="do not save indiviual samples. For speed measurements.",
     )
+
     parser.add_argument(
-        "-N",
-        "--steps",
+        "--ddim_steps",
         type=int,
         default=50,
-        help="number of sampling steps",
+        help="number of ddim sampling steps",
     )
+
     parser.add_argument(
         "--kl",
         action="store_true",
@@ -115,11 +139,6 @@ def main():
         help="use k-heun sampling",
     )
     parser.add_argument(
-        "--kha",
-        action="store_true",
-        help="use k-heun-ancestral sampling",
-    )
-    parser.add_argument(
         "--kd",
         action="store_true",
         help="use k-dpm-2 sampling",
@@ -129,53 +148,27 @@ def main():
         action="store_true",
         help="use k-dpm-2-ancestral sampling",
     )
-    parser.add_argument(
-        "--leaked",
-        action="store_true",
-        help="uses the leaked v1.3 model",
-    )
+
     parser.add_argument(
         "--fixed_code",
         action="store_true",
-        help="if enabled, uses the same starting code across samples ",
+        help="if enabled, uses the same starting code across all samples ",
+    )
+
+    parser.add_argument(
+        "--ddim_eta",
+        type=float,
+        default=0.0,
+        help="ddim eta (eta=0.0 corresponds to deterministic sampling",
     )
     parser.add_argument(
-        "--n-iter",
+        "--n_iter",
         type=int,
         default=1,
         help="sample this often",
     )
     parser.add_argument(
-        "-H",
-        "--height",
-        type=int,
-        default=512,
-        help="image height, in pixel space",
-    )
-    parser.add_argument(
-        "-W",
-        "--width",
-        type=int,
-        default=512,
-        help="image width, in pixel space",
-    )
-    parser.add_argument(
-        "--square",
-        action="store_true",
-        help="size preset",
-    )
-    parser.add_argument(
-        "--portrait",
-        action="store_true",
-        help="size preset",
-    )
-    parser.add_argument(
-        "--landscape",
-        action="store_true",
-        help="size preset",
-    )
-    parser.add_argument(
-        "--channels",
+        "--C",
         type=int,
         default=4,
         help="latent channels",
@@ -184,26 +177,32 @@ def main():
         "--f",
         type=int,
         default=8,
-        help="downsampling factor",
+        help="downsampling factor, most often 8 or 16",
     )
     parser.add_argument(
-        "--n-samples",
+        "--n_samples",
         type=int,
         default=1,
-        help="how many samples to produce for each given prompt. A.k.a. batch size",
+        help="how many samples to produce for each given prompt. A.k.a batch size",
     )
     parser.add_argument(
-        "--n-rows",
+        "--n_rows",
         type=int,
         default=0,
         help="rows in the grid (default: n_samples)",
     )
     parser.add_argument(
-        "-C",
         "--scale",
         type=float,
         default=7.5,
-        help="cfg scale - unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))",
+        help="unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))",
+    )
+
+    parser.add_argument(
+        "--strength",
+        type=float,
+        default=0.75,
+        help="strength for noising/unnoising. 1.0 corresponds to full destruction of information in init image",
     )
     parser.add_argument(
         "--from-file",
@@ -235,59 +234,44 @@ def main():
         choices=["full", "autocast"],
         default="autocast",
     )
-    parser.add_argument(
-        "--four",
-        action="store_true",
-        help="grid",
-    )
-    parser.add_argument(
-        "--six",
-        action="store_true",
-        help="grid",
-    )
-    parser.add_argument(
-        "--nine",
-        action="store_true",
-        help="grid",
-    )
-
-    opt = parser.parse_args()
-
-    if opt.square:
-        opt.height = 640
-        opt.width = 640
-    elif opt.portrait:
-        opt.height = 768
-        opt.width = 576
-    elif opt.landscape:
-        opt.height = 576
-        opt.width = 768
-
-    if opt.four:
-        opt.n_iter = 4
-        opt.n_rows = 2
-    elif opt.six:
-        opt.n_iter = 6
-        opt.n_rows = 3
-    elif opt.nine:
-        opt.n_iter = 9
-        opt.n_rows = 3
-
-    if opt.leaked:
-        print("Falling back to leaked v1.3 model...")
-        opt.ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
-
-    seed_everything(opt.seed)
 
     accelerator = accelerate.Accelerator()
+
+    opt = parser.parse_args()
+    seed_everything(opt.seed)
+    # seeds = torch.randint(-(2**63), 2**63 - 1, [accelerator.num_processes])
+    # torch.manual_seed(seeds[accelerator.process_index].item())
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
     model = model.half()
     model_wrap = K.external.CompVisDenoiser(model)
+    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
+
+    if opt.kl:
+        sampler = K.sampling.sample_lms
+        print("Sampler set to k-lms")
+    elif opt.kea:
+        sampler = K.sampling.sample_euler_ancestral
+        print("Sampler set to k-euler-ancestral")
+    elif opt.kh:
+        sampler = K.sampling.sample_heun
+        print("Sampler set to k-heun")
+    elif opt.kd:
+        sampler = K.sampling.sample_dpm_2
+        print("Sampler set to k-dpm-2")
+    elif opt.kda:
+        sampler = K.sampling.sample_dpm_2_ancestral
+        print("Sampler set to k-dpm-2-ancestral")
+    elif opt.ke:
+        sampler = K.sampling.sample_euler
+        print("Sampler set to k-euler")
+    else:
+        sampler = K.sampling.sample_euler
+        print("Sampler set to default (k-euler)")
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
@@ -310,36 +294,16 @@ def main():
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(outpath)) - 1
 
-    if opt.kl:
-        sampler = K.sampling.sample_lms
-        print("Sampler set to k-lms")
-    elif opt.kea:
-        sampler = K.sampling.sample_euler_ancestral
-        print("Sampler set to k-euler-ancestral")
-    elif opt.kh:
-        sampler = K.sampling.sample_heun
-        print("Sampler set to k-heun")
-    elif opt.kha:
-        sampler = K.sampling.sample_heun_ancestral
-        print("Sampler set to k-heun-ancestral")
-    elif opt.kd:
-        sampler = K.sampling.sample_dpm_2
-        print("Sampler set to k-dpm-2")
-    elif opt.kda:
-        sampler = K.sampling.sample_dpm_2_ancestral
-        print("Sampler set to k-dpm-2-ancestral")
-    elif opt.ke:
-        sampler = K.sampling.sample_euler
-        print("Sampler set to k-euler")
-    else:
-        sampler = K.sampling.sample_euler
-        print("Sampler set to default (k-euler)")
+    assert os.path.isfile(opt.init_img)
+    init_image = load_img(opt.init_img).to(device)
+    init_image = repeat(init_image, "1 ... -> b ...", b=batch_size)
+    init_latent = model.get_first_stage_encoding(
+        model.encode_first_stage(init_image)
+    )  # move to latent space
 
-    print(
-        "{} steps, cfg scale {}, output size {}x{}, {} total iterations".format(
-            opt.steps, opt.scale, opt.width, opt.height, opt.n_iter
-        )
-    )
+    assert 0.0 <= opt.strength <= 1.0, "can only work with strength in [0.0, 1.0]"
+    t_enc = int(opt.strength * opt.ddim_steps)
+    print(f"target t_enc is {t_enc} steps")
 
     precision_scope = autocast if opt.precision == "autocast" else nullcontext
     with torch.no_grad():
@@ -354,18 +318,20 @@ def main():
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)
                         c = model.get_learned_conditioning(prompts)
-                        shape = [opt.channels, opt.height // opt.f, opt.width // opt.f]
-                        sigmas = model_wrap.get_sigmas(opt.steps)
-                        x = (
-                            torch.randn([opt.n_samples, *shape], device=device)
-                            * sigmas[0]
-                        )  # for GPU draw
                         model_wrap_cfg = CFGDenoiser(model_wrap)
                         extra_args = {"cond": c, "uncond": uc, "cond_scale": opt.scale}
+                        # torch.manual_seed(opt.seed)  # changes manual seeding procedure
+                        sigmas = model_wrap.get_sigmas(opt.ddim_steps)
+                        noise = (
+                            torch.randn_like(init_latent)
+                            * sigmas[opt.ddim_steps - t_enc - 1]
+                        )
+                        init_noised = init_latent + noise
+                        sigma_sched = sigmas[opt.ddim_steps - t_enc - 1 :]
                         samples = sampler(
                             model_wrap_cfg,
-                            x,
-                            sigmas,
+                            init_noised,
+                            sigma_sched,
                             extra_args=extra_args,
                             disable=not accelerator.is_main_process,
                         )
@@ -375,17 +341,15 @@ def main():
                         )
 
                         if not opt.skip_save:
-                            for x_samp in x_samples:
-                                x_samp = 255.0 * rearrange(
-                                    x_samp.cpu().numpy(), "c h w -> h w c"
+                            for x_sample in x_samples:
+                                x_sample = 255.0 * rearrange(
+                                    x_sample.cpu().numpy(), "c h w -> h w c"
                                 )
-                                Image.fromarray(x_samp.astype(np.uint8)).save(
+                                Image.fromarray(x_sample.astype(np.uint8)).save(
                                     os.path.join(sample_path, f"{base_count:05}.png")
                                 )
                                 base_count += 1
-
-                        if not opt.skip_grid:
-                            all_samples.append(x_samples)
+                        all_samples.append(x_samples)
 
                 if not opt.skip_grid:
                     # additionally, save as grid
