@@ -6,7 +6,7 @@ import sys
 import time
 from contextlib import nullcontext
 from itertools import islice
-
+from gfpgan import GFPGANer
 import accelerate
 import gfpgan
 import k_diffusion as K
@@ -23,8 +23,9 @@ from torchvision.utils import make_grid
 from tqdm import tqdm, trange
 from transformers import logging
 
-GFPGAN_dir = "./src/GFPGAN"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+GFPGAN_dir = "./src/GFPGAN"
+
 
 def load_GFPGAN():
     model_name = "GFPGANv1.3"
@@ -33,7 +34,6 @@ def load_GFPGAN():
         raise Exception("GFPGAN model not found at path " + model_path)
 
     sys.path.append(os.path.abspath(GFPGAN_dir))
-    from gfpgan import GFPGANer
 
     return GFPGANer(
         model_path=model_path,
@@ -328,20 +328,21 @@ def main():
     accelerator = accelerate.Accelerator()
 
     GFPGAN = None
-    if os.path.exists(GFPGAN_dir):
-        try:
-            GFPGAN = load_GFPGAN()
-            GFPGAN.gfpgan.to("cpu")
-            GFPGAN.face_helper.face_parse.to("cpu")
-            GFPGAN.face_helper.face_det.to("cpu")
-            gc.collect()
-            torch.cuda.empty_cache()
-            print("Loaded GFPGAN")
-        except Exception:
-            import traceback
+    if opt.face:
+        if os.path.exists(GFPGAN_dir):
+            try:
+                GFPGAN = load_GFPGAN()
+                GFPGAN.gfpgan.to("cpu")
+                GFPGAN.face_helper.face_parse.to("cpu")
+                GFPGAN.face_helper.face_det.to("cpu")
+                gc.collect()
+                torch.cuda.empty_cache()
+                print("Loaded GFPGAN")
+            except Exception:
+                import traceback
 
-            print("Error loading GFPGAN:", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
+                print("Error loading GFPGAN:", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
