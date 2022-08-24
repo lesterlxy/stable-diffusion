@@ -35,13 +35,53 @@ def load_GFPGAN():
 
     sys.path.append(os.path.abspath(GFPGAN_dir))
 
-    return GFPGANer(
-        model_path=model_path,
-        upscale=1,
-        arch="clean",
-        channel_multiplier=2,
-        bg_upsampler=None,
-    )
+    return GFPGANer(model_path=model_path, upscale=1, arch="clean", channel_multiplier=2, bg_upsampler=None)
+
+
+def split_weighted_subprompts(text):
+    """
+    grabs all text up to the first occurrence of ':'
+    uses the grabbed text as a sub-prompt, and takes the value following ':' as weight
+    if ':' has no value defined, defaults to 1.0
+    repeats until no text remaining
+    """
+    remaining = len(text)
+    prompts = []
+    weights = []
+    while remaining > 0:
+        if ":" in text:
+            idx = text.index(":")  # first occurrence from start
+            # grab up to index as sub-prompt
+            prompt = text[:idx]
+            remaining -= idx
+            # remove from main text
+            text = text[idx + 1 :]
+            # find value for weight
+            if " " in text:
+                idx = text.index(" ")  # first occurence
+            else:  # no space, read to end
+                idx = len(text)
+            if idx != 0:
+                try:
+                    weight = float(text[:idx])
+                except:  # couldn't treat as float
+                    print(f"Warning: '{text[:idx]}' is not a value, are you missing a space?")
+                    weight = 1.0
+            else:  # no value found
+                weight = 1.0
+            # remove from main text
+            remaining -= idx
+            text = text[idx + 1 :]
+            # append the sub-prompt and its weight
+            prompts.append(prompt)
+            weights.append(weight)
+        else:  # no : found
+            if len(text) > 0:  # there is still text though
+                # take remainder as weight 1
+                prompts.append(text)
+                weights.append(1.0)
+            remaining = 0
+    return prompts, weights
 
 
 def chunk(it, size):
@@ -87,211 +127,43 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "-P",
-        "--prompt",
-        type=str,
-        nargs="?",
-        default="a painting of a virus monster playing guitar",
-        help="the prompt to render",
-    )
-    parser.add_argument(
-        "--outdir",
-        type=str,
-        nargs="?",
-        help="dir to write results to",
-        default="outputs/txt2img-samples",
-    )
-    parser.add_argument(
-        "--skip_grid",
-        action="store_true",
-        help="do not save a grid, only individual samples. Helpful when evaluating lots of samples",
-    )
-    parser.add_argument(
-        "--skip_save",
-        action="store_true",
-        help="do not save individual samples. For speed measurements.",
-    )
-    parser.add_argument(
-        "-N",
-        "--steps",
-        type=int,
-        default=50,
-        help="number of sampling steps",
-    )
-    parser.add_argument(
-        "--kl",
-        action="store_true",
-        help="use k-lms sampling",
-    )
-    parser.add_argument(
-        "--ke",
-        action="store_true",
-        help="use k-euler sampling (default)",
-    )
-    parser.add_argument(
-        "--kea",
-        action="store_true",
-        help="use k-euler-ancestral sampling",
-    )
-    parser.add_argument(
-        "--kh",
-        action="store_true",
-        help="use k-heun sampling",
-    )
-    parser.add_argument(
-        "--kha",
-        action="store_true",
-        help="use k-heun-ancestral sampling",
-    )
-    parser.add_argument(
-        "--kd",
-        action="store_true",
-        help="use k-dpm-2 sampling",
-    )
-    parser.add_argument(
-        "--kda",
-        action="store_true",
-        help="use k-dpm-2-ancestral sampling",
-    )
-    parser.add_argument(
-        "--leaked",
-        action="store_true",
-        help="uses the leaked v1.3 model",
-    )
-    parser.add_argument(
-        "--fixed_code",
-        action="store_true",
-        help="if enabled, uses the same starting code across samples ",
-    )
-    parser.add_argument(
-        "--n-iter",
-        type=int,
-        default=1,
-        help="sample this often",
-    )
-    parser.add_argument(
-        "-H",
-        "--height",
-        type=int,
-        default=512,
-        help="image height, in pixel space",
-    )
-    parser.add_argument(
-        "-W",
-        "--width",
-        type=int,
-        default=512,
-        help="image width, in pixel space",
-    )
-    parser.add_argument(
-        "--square",
-        action="store_true",
-        help="size preset",
-    )
-    parser.add_argument(
-        "--portrait",
-        action="store_true",
-        help="size preset",
-    )
-    parser.add_argument(
-        "--landscape",
-        action="store_true",
-        help="size preset",
-    )
-    parser.add_argument(
-        "--channels",
-        type=int,
-        default=4,
-        help="latent channels",
-    )
-    parser.add_argument(
-        "--factor",
-        type=int,
-        default=8,
-        help="downsampling factor",
-    )
-    parser.add_argument(
-        "--n-samples",
-        type=int,
-        default=1,
-        help="how many samples to produce for each given prompt. A.k.a. batch size",
-    )
-    parser.add_argument(
-        "--n-rows",
-        type=int,
-        default=0,
-        help="rows in the grid (default: n_samples)",
-    )
-    parser.add_argument(
-        "-C",
-        "--scale",
-        type=float,
-        default=7.5,
-        help="cfg scale - unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))",
-    )
-    parser.add_argument(
-        "--from-file",
-        type=str,
-        help="if specified, load prompts from this file",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/stable-diffusion/v1-inference.yaml",
-        help="path to config which constructs model",
-    )
-    parser.add_argument(
-        "--ckpt",
-        type=str,
-        default="models/ldm/stable-diffusion-v1-4/model.ckpt",
-        help="path to checkpoint of model",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="the seed (for reproducible sampling)",
-    )
-    parser.add_argument(
-        "--random",
-        action="store_true",
-        help="randomize seed",
-    )
-    parser.add_argument(
-        "--precision",
-        type=str,
-        help="evaluate at this precision",
-        choices=["full", "autocast"],
-        default="autocast",
-    )
-    parser.add_argument(
-        "--sigma",
-        type=str,
-        help="sigma scheduler",
-        choices=["old", "karras", "exp", "vp"],
-        default="karras",
-    )
-    parser.add_argument(
-        "--four",
-        action="store_true",
-        help="grid",
-    )
-    parser.add_argument(
-        "--six",
-        action="store_true",
-        help="grid",
-    )
-    parser.add_argument(
-        "--nine",
-        action="store_true",
-        help="grid",
-    )
-    parser.add_argument(
-        "--face",
-        action="store_true",
-        help="gfpgan face fixer",
-    )
+    parser.add_argument("-P", "--prompt", type=str, nargs="?", default="a painting of a virus monster playing guitar", help="the prompt to render")
+    parser.add_argument("--outdir", type=str, nargs="?", help="dir to write results to", default="outputs/txt2img-samples")
+    parser.add_argument("--skip_grid", action="store_true", help="do not save a grid, only individual samples. Helpful when evaluating lots of samples")
+    parser.add_argument("--skip_save", action="store_true", help="do not save individual samples. For speed measurements.")
+    parser.add_argument("-N", "--steps", type=int, default=50, help="number of sampling steps")
+    parser.add_argument("--kl", action="store_true", help="use k-lms sampling")
+    parser.add_argument("--ke", action="store_true", help="use k-euler sampling (default)")
+    parser.add_argument("--kea", action="store_true", help="use k-euler-ancestral sampling")
+    parser.add_argument("--kh", action="store_true", help="use k-heun sampling")
+    parser.add_argument("--kha", action="store_true", help="use k-heun-ancestral sampling")
+    parser.add_argument("--kd", action="store_true", help="use k-dpm-2 sampling")
+    parser.add_argument("--kda", action="store_true", help="use k-dpm-2-ancestral sampling")
+    parser.add_argument("--leaked", action="store_true", help="uses the leaked v1.3 model")
+    parser.add_argument("--fixed_code", action="store_true", help="if enabled, uses the same starting code across samples ")
+    parser.add_argument("--n-iter", type=int, default=1, help="sample this often")
+    parser.add_argument("-H", "--height", type=int, default=512, help="image height, in pixel space")
+    parser.add_argument("-W", "--width", type=int, default=512, help="image width, in pixel space")
+    parser.add_argument("--square", action="store_true", help="size preset")
+    parser.add_argument("--portrait", action="store_true", help="size preset")
+    parser.add_argument("--landscape", action="store_true", help="size preset")
+    parser.add_argument("--channels", type=int, default=4, help="latent channels")
+    parser.add_argument("--factor", type=int, default=8, help="downsampling factor")
+    parser.add_argument("--n-samples", type=int, default=1, help="how many samples to produce for each given prompt. A.k.a. batch size")
+    parser.add_argument("--n-rows", type=int, default=0, help="rows in the grid (default: n_samples)")
+    parser.add_argument("-C", "--scale", type=float, default=7.5, help="cfg scale - unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))")
+    parser.add_argument("--from-file", type=str, help="if specified, load prompts from this file")
+    parser.add_argument("--config", type=str, default="configs/stable-diffusion/v1-inference.yaml", help="path to config which constructs model")
+    parser.add_argument("--ckpt", type=str, default="models/ldm/stable-diffusion-v1-4/model.ckpt", help="path to checkpoint of model")
+    parser.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
+    parser.add_argument("--random", action="store_true", help="randomize seed")
+    parser.add_argument("--precision", type=str, help="evaluate at this precision", choices=["full", "autocast"], default="autocast")
+    parser.add_argument("--sigma", type=str, help="sigma scheduler", choices=["old", "karras", "exp", "vp"], default="karras")
+    parser.add_argument("--four", action="store_true", help="grid")
+    parser.add_argument("--six", action="store_true", help="grid")
+    parser.add_argument("--nine", action="store_true", help="grid")
+    parser.add_argument("--face", action="store_true", help="gfpgan face fixer")
+    parser.add_argument("--skip-normalize", action="store_true", help="normalize prompt weight")
 
     opt = parser.parse_args()
 
@@ -400,11 +272,7 @@ def main():
         sampler = K.sampling.sample_euler_ancestral
         print("Sampler set to default (k-euler-ancestral)")
 
-    print(
-        "{} steps, cfg scale {}, output size {}x{}, {} total iterations".format(
-            opt.steps, opt.scale, opt.width, opt.height, opt.n_iter
-        )
-    )
+    print("{} steps, cfg scale {}, output size {}x{}, {} total iterations".format(opt.steps, opt.scale, opt.width, opt.height, opt.n_iter))
 
     precision_scope = autocast if opt.precision == "autocast" else nullcontext
     with torch.no_grad():
@@ -418,39 +286,39 @@ def main():
                             uc = model.get_learned_conditioning(batch_size * [""])
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)
-                        c = model.get_learned_conditioning(prompts)
-                        shape = [
-                            opt.channels,
-                            opt.height // opt.factor,
-                            opt.width // opt.factor,
-                        ]
+
+                        # weighted sub-prompts
+                        subprompts, weights = split_weighted_subprompts(prompts[0])
+                        if len(subprompts) > 1:
+                            # i dont know if this is correct.. but it works
+                            c = torch.zeros_like(uc)
+                            # get total weight for normalizing
+                            totalWeight = sum(weights)
+                            # normalize each "sub prompt" and add it
+                            for i in range(0, len(subprompts)):
+                                weight = weights[i]
+                                if not opt.skip_normalize:
+                                    weight = weight / totalWeight
+                                c = torch.add(c, model.get_learned_conditioning(subprompts[i]), alpha=weight)
+                        else:  # just standard 1 prompt
+                            c = model.get_learned_conditioning(prompts)
+
+                        shape = [opt.channels, opt.height // opt.factor, opt.width // opt.factor]
 
                         if opt.sigma == "old":
                             sigmas = model_wrap.get_sigmas(opt.steps)
                         elif opt.sigma == "karras":
-                            sigmas = K.sampling.get_sigmas_karras(
-                                opt.steps, sigma_min, sigma_max, device=devicestr
-                            )
+                            sigmas = K.sampling.get_sigmas_karras(opt.steps, sigma_min, sigma_max, device=devicestr)
                         elif opt.sigma == "exp":
-                            sigmas = K.sampling.get_sigmas_exponential(
-                                opt.steps, sigma_min, sigma_max, device=devicestr
-                            )
+                            sigmas = K.sampling.get_sigmas_exponential(opt.steps, sigma_min, sigma_max, device=devicestr)
                         elif opt.sigma == "vp":
                             sigmas = K.sampling.get_sigmas_vp(opt.steps, device=devicestr)
                         else:
                             raise ValueError("sigma option error")
-                        x = (
-                            torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
-                        )  # for GPU draw
+                        x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]  # for GPU draw
                         model_wrap_cfg = CFGDenoiser(model_wrap)
                         extra_args = {"cond": c, "uncond": uc, "cond_scale": opt.scale}
-                        samples = sampler(
-                            model_wrap_cfg,
-                            x,
-                            sigmas,
-                            extra_args=extra_args,
-                            disable=not accelerator.is_main_process,
-                        )
+                        samples = sampler(model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
                         x_samples = model.decode_first_stage(samples)
                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
@@ -466,12 +334,7 @@ def main():
                                     GFPGAN.gfpgan.to("cuda")
                                     GFPGAN.face_helper.face_parse.to("cuda")
                                     GFPGAN.face_helper.face_det.to("cuda")
-                                    _, _, restored_img = GFPGAN.enhance(
-                                        x_samp,
-                                        has_aligned=False,
-                                        only_center_face=False,
-                                        paste_back=True,
-                                    )
+                                    _, _, restored_img = GFPGAN.enhance(x_samp, has_aligned=False, only_center_face=False, paste_back=True)
                                     x_samp = restored_img
                                     GFPGAN.gfpgan.to("cpu")
                                     GFPGAN.face_helper.face_parse.to("cpu")
@@ -481,9 +344,7 @@ def main():
                                     model.to("cuda")
                                     print("Face fixed!")
 
-                                Image.fromarray(x_samp).save(
-                                    os.path.join(sample_path, f"{base_count:05}.png")
-                                )
+                                Image.fromarray(x_samp).save(os.path.join(sample_path, f"{base_count:05}.png"))
                                 base_count += 1
 
                         if not opt.skip_grid:
@@ -497,9 +358,7 @@ def main():
 
                     # to image
                     grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
-                    Image.fromarray(grid.astype(np.uint8)).save(
-                        os.path.join(outpath, f"grid-{grid_count:04}.png")
-                    )
+                    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f"grid-{grid_count:04}.png"))
                     grid_count += 1
 
     print(f"Your samples are ready and waiting for you here: \n{outpath} \n" f" \nEnjoy.")
