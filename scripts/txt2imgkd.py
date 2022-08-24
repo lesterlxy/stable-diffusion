@@ -1,9 +1,12 @@
 import argparse
 import os
+import random
+import sys
 from contextlib import nullcontext
 from itertools import islice
 
 import accelerate
+import gfpgan
 import k_diffusion as K
 import numpy as np
 import torch
@@ -17,6 +20,26 @@ from torch import autocast
 from torchvision.utils import make_grid
 from tqdm import tqdm, trange
 from transformers import logging
+
+GFPGAN_dir = "./src/GFPGAN"
+
+
+def load_GFPGAN():
+    model_name = "GFPGANv1.3"
+    model_path = os.path.join(GFPGAN_dir, "experiments/pretrained_models", model_name + ".pth")
+    if not os.path.isfile(model_path):
+        raise Exception("GFPGAN model not found at path " + model_path)
+
+    sys.path.append(os.path.abspath(GFPGAN_dir))
+    from gfpgan import GFPGANer
+
+    return GFPGANer(
+        model_path=model_path,
+        upscale=1,
+        arch="clean",
+        channel_multiplier=2,
+        bg_upsampler=None,
+    )
 
 
 def chunk(it, size):
@@ -181,7 +204,7 @@ def main():
         help="latent channels",
     )
     parser.add_argument(
-        "--f",
+        "--factor",
         type=int,
         default=8,
         help="downsampling factor",
@@ -225,8 +248,13 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=62353535,
+        default=42,
         help="the seed (for reproducible sampling)",
+    )
+    parser.add_argument(
+        "--random",
+        action="store_true",
+        help="randomize seed",
     )
     parser.add_argument(
         "--precision",
@@ -234,6 +262,13 @@ def main():
         help="evaluate at this precision",
         choices=["full", "autocast"],
         default="autocast",
+    )
+    parser.add_argument(
+        "--sigma",
+        type=str,
+        help="sigma scheduler",
+        choices=["old", "karras", "exp", "vp"],
+        default="karras",
     )
     parser.add_argument(
         "--four",
@@ -249,6 +284,11 @@ def main():
         "--nine",
         action="store_true",
         help="grid",
+    )
+    parser.add_argument(
+        "--face",
+        action="store_true",
+        help="gfpgan face fixer",
     )
 
     opt = parser.parse_args()
@@ -277,16 +317,35 @@ def main():
         print("Falling back to leaked v1.3 model...")
         opt.ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
 
-    seed_everything(opt.seed)
+    if opt.random:
+        print("Randomized seed!")
+        seed_everything(random.getrandbits(32))
+    else:
+        seed_everything(opt.seed)
 
     accelerator = accelerate.Accelerator()
+
+    GFPGAN = None
+    if opt.face:
+        if os.path.exists(GFPGAN_dir):
+            try:
+                GFPGAN = load_GFPGAN()
+                GFPGAN.gfpgan.to("cpu")  # save vram
+                print("Loaded GFPGAN")
+            except Exception:
+                import traceback
+
+                print("Error loading GFPGAN:", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
     model = model.half()
     model_wrap = K.external.CompVisDenoiser(model)
+    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    devicestr = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(devicestr)
     model = model.to(device)
 
     os.makedirs(opt.outdir, exist_ok=True)
@@ -332,8 +391,8 @@ def main():
         sampler = K.sampling.sample_euler
         print("Sampler set to k-euler")
     else:
-        sampler = K.sampling.sample_euler
-        print("Sampler set to default (k-euler)")
+        sampler = K.sampling.sample_euler_ancestral
+        print("Sampler set to default (k-euler-ancestral)")
 
     print(
         "{} steps, cfg scale {}, output size {}x{}, {} total iterations".format(
@@ -354,11 +413,28 @@ def main():
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)
                         c = model.get_learned_conditioning(prompts)
-                        shape = [opt.channels, opt.height // opt.f, opt.width // opt.f]
-                        sigmas = model_wrap.get_sigmas(opt.steps)
+                        shape = [
+                            opt.channels,
+                            opt.height // opt.factor,
+                            opt.width // opt.factor,
+                        ]
+
+                        if opt.sigma == "old":
+                            sigmas = model_wrap.get_sigmas(opt.steps)
+                        elif opt.sigma == "karras":
+                            sigmas = K.sampling.get_sigmas_karras(
+                                opt.steps, sigma_min, sigma_max, device=devicestr
+                            )
+                        elif opt.sigma == "exp":
+                            sigmas = K.sampling.get_sigmas_exponential(
+                                opt.steps, sigma_min, sigma_max, device=devicestr
+                            )
+                        elif opt.sigma == "vp":
+                            sigmas = K.sampling.get_sigmas_vp(opt.steps, device=devicestr)
+                        else:
+                            raise ValueError("sigma option error")
                         x = (
-                            torch.randn([opt.n_samples, *shape], device=device)
-                            * sigmas[0]
+                            torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
                         )  # for GPU draw
                         model_wrap_cfg = CFGDenoiser(model_wrap)
                         extra_args = {"cond": c, "uncond": uc, "cond_scale": opt.scale}
@@ -370,16 +446,28 @@ def main():
                             disable=not accelerator.is_main_process,
                         )
                         x_samples = model.decode_first_stage(samples)
-                        x_samples = torch.clamp(
-                            (x_samples + 1.0) / 2.0, min=0.0, max=1.0
-                        )
+                        x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
                         if not opt.skip_save:
                             for x_samp in x_samples:
-                                x_samp = 255.0 * rearrange(
-                                    x_samp.cpu().numpy(), "c h w -> h w c"
-                                )
-                                Image.fromarray(x_samp.astype(np.uint8)).save(
+                                x_samp = 255.0 * rearrange(x_samp.cpu().numpy(), "c h w -> h w c")
+                                x_samp = x_samp.astype(np.uint8)
+
+                                if opt.face and GFPGAN is not None:
+                                    model.to("cpu")
+                                    GFPGAN.gfpgan.to("cuda")
+                                    torch.device("cuda")
+                                    _, _, restored_img = GFPGAN.enhance(
+                                        x_samp,
+                                        has_aligned=False,
+                                        only_center_face=False,
+                                        paste_back=True,
+                                    )
+                                    x_samp = restored_img
+                                    GFPGAN.gfpgan.to("cpu")
+                                    model.to("cuda")
+
+                                Image.fromarray(x_samp).save(
                                     os.path.join(sample_path, f"{base_count:05}.png")
                                 )
                                 base_count += 1
@@ -400,9 +488,7 @@ def main():
                     )
                     grid_count += 1
 
-    print(
-        f"Your samples are ready and waiting for you here: \n{outpath} \n" f" \nEnjoy."
-    )
+    print(f"Your samples are ready and waiting for you here: \n{outpath} \n" f" \nEnjoy.")
 
 
 if __name__ == "__main__":
