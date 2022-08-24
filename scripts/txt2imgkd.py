@@ -1,7 +1,9 @@
 import argparse
+import gc
 import os
 import random
 import sys
+import time
 from contextlib import nullcontext
 from itertools import islice
 
@@ -22,7 +24,7 @@ from tqdm import tqdm, trange
 from transformers import logging
 
 GFPGAN_dir = "./src/GFPGAN"
-
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 def load_GFPGAN():
     model_name = "GFPGANv1.3"
@@ -326,17 +328,20 @@ def main():
     accelerator = accelerate.Accelerator()
 
     GFPGAN = None
-    if opt.face:
-        if os.path.exists(GFPGAN_dir):
-            try:
-                GFPGAN = load_GFPGAN()
-                GFPGAN.gfpgan.to("cpu")  # save vram
-                print("Loaded GFPGAN")
-            except Exception:
-                import traceback
+    if os.path.exists(GFPGAN_dir):
+        try:
+            GFPGAN = load_GFPGAN()
+            GFPGAN.gfpgan.to("cpu")
+            GFPGAN.face_helper.face_parse.to("cpu")
+            GFPGAN.face_helper.face_det.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            print("Loaded GFPGAN")
+        except Exception:
+            import traceback
 
-                print("Error loading GFPGAN:", file=sys.stderr)
-                print(traceback.format_exc(), file=sys.stderr)
+            print("Error loading GFPGAN:", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
@@ -455,8 +460,11 @@ def main():
 
                                 if opt.face and GFPGAN is not None:
                                     model.to("cpu")
+                                    gc.collect()
+                                    torch.cuda.empty_cache()
                                     GFPGAN.gfpgan.to("cuda")
-                                    torch.device("cuda")
+                                    GFPGAN.face_helper.face_parse.to("cuda")
+                                    GFPGAN.face_helper.face_det.to("cuda")
                                     _, _, restored_img = GFPGAN.enhance(
                                         x_samp,
                                         has_aligned=False,
@@ -465,7 +473,12 @@ def main():
                                     )
                                     x_samp = restored_img
                                     GFPGAN.gfpgan.to("cpu")
+                                    GFPGAN.face_helper.face_parse.to("cpu")
+                                    GFPGAN.face_helper.face_det.to("cpu")
+                                    gc.collect()
+                                    torch.cuda.empty_cache()
                                     model.to("cuda")
+                                    print("Face fixed!")
 
                                 Image.fromarray(x_samp).save(
                                     os.path.join(sample_path, f"{base_count:05}.png")
