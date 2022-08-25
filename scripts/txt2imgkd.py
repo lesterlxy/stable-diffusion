@@ -7,8 +7,10 @@ from contextlib import nullcontext
 from itertools import islice
 
 import accelerate
+import clip
 import k_diffusion as K
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -18,9 +20,12 @@ from omegaconf import OmegaConf
 from PIL import Image
 from pytorch_lightning import seed_everything
 from torch import autocast
+from torchvision import transforms
 from torchvision.utils import make_grid
 from tqdm import tqdm, trange
 from transformers import logging
+from src.blip.models.blip import blip_decoder
+from torchvision.transforms.functional import InterpolationMode
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 GFPGAN_dir = "./src/GFPGAN"
@@ -135,6 +140,160 @@ class CFGDenoiser(nn.Module):
         return uncond + (cond - uncond) * cond_scale
 
 
+class Interrogator:
+    # credit to https://colab.research.google.com/github/pharmapsychotic/clip-interrogator/blob/main/clip_interrogator.ipynb
+    def __init__(self, device, blip_image_eval_size: int = 384):
+        def load_list(filename):
+            with open(filename, "r", encoding="utf-8", errors="replace") as f:
+                items = [line.strip() for line in f.readlines()]
+            return items
+
+        self.device = device
+
+        # "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth"
+        blip_model_url = os.path.join("models", "blip", "model_base_caption.pth")
+        blip_model_url = os.path.join(os.getcwd(), blip_model_url)
+        self.blip_image_eval_size = blip_image_eval_size
+        self.blip_model = blip_decoder(pretrained=blip_model_url, image_size=blip_image_eval_size, vit="base", med_config="src/blip/configs/med_config.json")
+        self.blip_model.eval()
+        self.blip_model.half()
+        self.blip_model.to(device)
+
+        data_path = "./src/clip-interrogator/data/"
+        self.artists = load_list(os.path.join(data_path, "artists.txt"))
+        self.flavors = load_list(os.path.join(data_path, "flavors.txt"))
+        self.mediums = load_list(os.path.join(data_path, "mediums.txt"))
+        self.movements = load_list(os.path.join(data_path, "movements.txt"))
+
+        sites = [
+            "Artstation",
+            "behance",
+            "cg society",
+            "cgsociety",
+            "deviantart",
+            "dribble",
+            "flickr",
+            "instagram",
+            "pexels",
+            "pinterest",
+            "pixabay",
+            "pixiv",
+            "polycount",
+            "reddit",
+            "shutterstock",
+            "tumblr",
+            "unsplash",
+            "zbrush central",
+        ]
+        self.trending_list = [site for site in sites]
+        self.trending_list.extend(["trending on " + site for site in sites])
+        self.trending_list.extend(["featured on " + site for site in sites])
+        self.trending_list.extend([site + " contest winner" for site in sites])
+
+        self.model_name = "ViT-L/14"  # only one model for stable diffusion as recommended by pharmapsychotic/clip-interrogator
+        self.model, self.preprocess = clip.load(self.model_name)
+        self.model.eval()
+        self.model.to(device)
+
+    def __del__(self):
+        del self.model
+        del self.blip_model
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def rank(self, image_features, text_array, top_count=1):
+        top_count = min(top_count, len(text_array))
+        text_tokens = clip.tokenize([text for text in text_array]).cuda()
+        with torch.no_grad():
+            text_features = self.model.encode_text(text_tokens).half()
+        text_features /= text_features.norm(dim=-1, keepdim=True)
+
+        similarity = torch.zeros((1, len(text_array))).to(self.device)
+        for i in range(image_features.shape[0]):
+            similarity += (100.0 * image_features[i].unsqueeze(0) @ text_features.T).softmax(dim=-1)
+        similarity /= image_features.shape[0]
+
+        del image_features
+
+        top_probs, top_labels = similarity.cpu().topk(top_count, dim=-1)
+
+        return [(text_array[top_labels[0][i].numpy()], (top_probs[0][i].numpy() * 100)) for i in range(top_count)]
+
+    def get_ranks(self, image_features):
+        return [
+            self.rank(image_features, self.mediums),
+            # self.rank(image_features, ["by "+artist for artist in self.artists]), # memory boom on 10G
+            self.rank(image_features, self.trending_list),
+            self.rank(image_features, self.movements),
+            self.rank(image_features, self.flavors, top_count=3),
+        ]
+
+    def generate_caption(self, image):
+        gpu_image = (
+            transforms.Compose(
+                [
+                    transforms.Resize((self.blip_image_eval_size, self.blip_image_eval_size), interpolation=InterpolationMode.LANCZOS),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+                ]
+            )(image)
+            .unsqueeze(0)
+            .half()
+            .to(self.device)
+        )
+
+        with torch.no_grad():
+            caption = self.blip_model.generate(gpu_image, sample=False, num_beams=3, max_length=20, min_length=5)
+        return caption[0]
+
+    def interrogate(self, image):
+        caption = self.generate_caption(image)
+
+        table = []
+        bests = [[("", 0)]] * 5
+
+        images = self.preprocess(image).unsqueeze(0).half().cuda()
+        with torch.no_grad():
+            image_features = self.model.visual(images)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        image_features.half()
+
+        del images
+        self.blip_model.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        ranks = self.get_ranks(image_features)
+
+        self.blip_model.to(self.device)
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        for i in range(len(ranks)):
+            confidence_sum = 0
+            for ci in range(len(ranks[i])):
+                confidence_sum += ranks[i][ci][1]
+            if confidence_sum > sum(bests[i][t][1] for t in range(len(bests[i]))):
+                bests[i] = ranks[i]
+
+        row = [self.model_name]
+        for r in ranks:
+            row.append(", ".join([f"{x[0]} ({x[1]:0.1f}%)" for x in r]))
+
+        table.append(row)
+
+        print(pd.DataFrame(table, columns=["Model", "Medium", "Trending", "Movement", "Flavors"]))  # removed artists column
+
+        flaves = ", ".join([f"{x[0]}" for x in bests[4]])
+        medium = bests[0][0][0]
+        if caption.startswith(medium):
+            modifiers = f"{bests[1][0][0]}, {bests[2][0][0]}, {bests[3][0][0]}, {flaves}"
+        else:
+            modifiers = f"{medium} {bests[1][0][0]}, {bests[2][0][0]}, {bests[3][0][0]}, {flaves}"
+        print(f"{caption}, {modifiers}")
+        return caption, modifiers
+
+
 def main():
     logging.set_verbosity_error()  # suppress BERT errors
 
@@ -179,6 +338,9 @@ def main():
     parser.add_argument("--skip-normalize", action="store_true", help="normalize prompt weight")
     parser.add_argument("-i", "--init", action="append", help="init images")
     parser.add_argument("--init-factor", type=float, default=0.8, help="strength of the init image, 0.0-1.0")
+    parser.add_argument("--interrogate", action="store_true", help="interrogate init images to enhance prompt")
+    parser.add_argument("--caption", action="store_true", help="use interrogated caption")
+    parser.add_argument("--prefix", action="store_true", help="use interrogated prompt as prefix (default behavior suffix)")
     opt = parser.parse_args()
     assert opt.width % 32 == 0, f"width {opt.width} not a multiple of 32, try {opt.width - (opt.width % 32)}"
     assert opt.height % 32 == 0, f"height {opt.height} not a multiple of 32, try {opt.height - (opt.height % 32)}"
@@ -216,32 +378,10 @@ def main():
 
     accelerator = accelerate.Accelerator()
 
-    GFPGAN = None
-    if opt.face:
-        if os.path.exists(GFPGAN_dir):
-            try:
-                GFPGAN = load_GFPGAN()
-                GFPGAN.gfpgan.to("cpu")
-                GFPGAN.face_helper.face_parse.to("cpu")
-                GFPGAN.face_helper.face_det.to("cpu")
-                gc.collect()
-                torch.cuda.empty_cache()
-                print("Loaded GFPGAN")
-            except Exception:
-                import traceback
-
-                print("Error loading GFPGAN:", file=sys.stderr)
-                print(traceback.format_exc(), file=sys.stderr)
-
     config = OmegaConf.load(f"{opt.config}")
-    model = load_model_from_config(config, f"{opt.ckpt}")
-    model = model.half()
-    model_wrap = K.external.CompVisDenoiser(model)
-    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
 
     devicestr = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(devicestr)
-    model = model.to(device)
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
@@ -252,7 +392,6 @@ def main():
         prompt = opt.prompt
         assert prompt is not None
         data = [batch_size * [prompt]]
-
     else:
         print(f"reading prompts from {opt.from_file}")
         with open(opt.from_file, "r") as f:
@@ -291,6 +430,53 @@ def main():
 
     print("{} steps, cfg scale {}, output size {}x{}, {} total iterations".format(opt.steps, opt.scale, opt.width, opt.height, opt.n_iter))
 
+    int_caps = ""
+    int_mods = ""
+    if opt.init and opt.interrogate:
+        inter = Interrogator(devicestr, blip_image_eval_size=512)
+        int_caps = []
+        int_mods = []
+        for i in opt.init:
+            print(f"Interrogating {i} ...")
+            im = Image.open(i).convert("RGB")
+            c, m = inter.interrogate(im)
+            m = m.split(",")
+            int_caps.append(c)
+            int_mods += m
+        int_mods = [m.strip() for m in int_mods]
+        int_mods = list(dict.fromkeys(int_mods))
+        int_mods = ", ".join(int_mods)
+        int_caps = list(dict.fromkeys(int_caps))
+        int_caps = ", ".join(int_caps)
+        del inter
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"Interrogated captions: {int_caps}")
+        print(f"Interrogated modifiers: {int_mods}")
+
+    GFPGAN = None
+    if opt.face:
+        if os.path.exists(GFPGAN_dir):
+            try:
+                GFPGAN = load_GFPGAN()
+                GFPGAN.gfpgan.to("cpu")
+                GFPGAN.face_helper.face_parse.to("cpu")
+                GFPGAN.face_helper.face_det.to("cpu")
+                gc.collect()
+                torch.cuda.empty_cache()
+                print("Loaded GFPGAN")
+            except Exception:
+                import traceback
+
+                print("Error loading GFPGAN:", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
+
+    model = load_model_from_config(config, f"{opt.ckpt}")
+    model = model.half()
+    model_wrap = K.external.CompVisDenoiser(model)
+    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
+    model = model.to(device)
+
     shape = [opt.channels, opt.height // opt.factor, opt.width // opt.factor]
     init_latent = None
     if opt.init:
@@ -314,6 +500,19 @@ def main():
                             prompts = list(prompts)
 
                         # weighted sub-prompts
+                        if opt.interrogate:
+                            p = int_mods
+                            if opt.caption:
+                                p = int_caps + ", " + p
+                            p = p.split(",")
+                            p = [i.strip() for i in p]
+                            p = [i for i in p if i]
+                            p = ", ".join(p)
+                            if opt.prefix:
+                                prompts[0] = p + ", " + prompts[0]
+                            else:
+                                prompts[0] = prompts[0] + ", " + p
+                        print(f"Using prompt: {prompts[0]}")
                         subprompts, weights = split_weighted_subprompts(prompts[0])
                         if len(subprompts) > 1:
                             # i dont know if this is correct.. but it works
