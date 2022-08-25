@@ -88,12 +88,14 @@ def chunk(it, size):
     return iter(lambda: tuple(islice(it, size)), ())
 
 
-def load_img(path):
+def load_img(path, target_w, target_h):
     image = Image.open(path).convert("RGB")
     w, h = image.size
     print(f"loaded input image of size ({w}, {h}) from {path}")
-    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-    image = image.resize((w, h), resample=Image.LANCZOS)
+    if w != target_w or h != target_h:
+        print(f"mismatch with target size ({target_w}, {target_h}), resizing")
+        image = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        w, h = image.size
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image).half()
@@ -178,6 +180,9 @@ def main():
     parser.add_argument("-i", "--init", action="append", help="init images")
     parser.add_argument("--init-factor", type=float, default=0.8, help="strength of the init image, 0.0-1.0")
     opt = parser.parse_args()
+    assert opt.width % 32 == 0, f"width {opt.width} not a multiple of 32, try {opt.width - (opt.width % 32)}"
+    assert opt.height % 32 == 0, f"height {opt.height} not a multiple of 32, try {opt.height - (opt.height % 32)}"
+    assert 0.0 <= opt.init_factor <= 1.0, "can only work with init_factor in [0.0, 1.0]"
 
     if opt.square:
         opt.height = 640
@@ -289,10 +294,9 @@ def main():
     shape = [opt.channels, opt.height // opt.factor, opt.width // opt.factor]
     init_latent = None
     if opt.init:
-        assert 0.0 <= opt.init_factor <= 1.0, "can only work with init_factor in [0.0, 1.0]"
         init_latent = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
         for i in opt.init:
-            im = load_img(i).to(device)
+            im = load_img(i, opt.width, opt.height).to(device)
             im_latent = model.get_first_stage_encoding(model.encode_first_stage(im))
             init_latent += im_latent / len(opt.init)
 
