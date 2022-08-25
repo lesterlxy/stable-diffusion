@@ -3,17 +3,16 @@ import gc
 import os
 import random
 import sys
-import time
 from contextlib import nullcontext
 from itertools import islice
-from gfpgan import GFPGANer
+
 import accelerate
-import gfpgan
 import k_diffusion as K
 import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from gfpgan import GFPGANer
 from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 from PIL import Image
@@ -87,6 +86,18 @@ def split_weighted_subprompts(text):
 def chunk(it, size):
     it = iter(it)
     return iter(lambda: tuple(islice(it, size)), ())
+
+
+def load_img(path):
+    image = Image.open(path).convert("RGB")
+    w, h = image.size
+    print(f"loaded input image of size ({w}, {h}) from {path}")
+    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    image = image.resize((w, h), resample=Image.LANCZOS)
+    image = np.array(image).astype(np.float32) / 255.0
+    image = image[None].transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image).half()
+    return 2.0 * image - 1.0
 
 
 def load_model_from_config(config, ckpt, verbose=False):
@@ -164,7 +175,8 @@ def main():
     parser.add_argument("--nine", action="store_true", help="grid")
     parser.add_argument("--face", action="store_true", help="gfpgan face fixer")
     parser.add_argument("--skip-normalize", action="store_true", help="normalize prompt weight")
-
+    parser.add_argument("-i", "--init", action="append", help="init images")
+    parser.add_argument("--init-factor", type=float, default=0.8, help="strength of the init image, 0.0-1.0")
     opt = parser.parse_args()
 
     if opt.square:
@@ -274,6 +286,16 @@ def main():
 
     print("{} steps, cfg scale {}, output size {}x{}, {} total iterations".format(opt.steps, opt.scale, opt.width, opt.height, opt.n_iter))
 
+    shape = [opt.channels, opt.height // opt.factor, opt.width // opt.factor]
+    init_latent = None
+    if opt.init:
+        assert 0.0 <= opt.init_factor <= 1.0, "can only work with init_factor in [0.0, 1.0]"
+        init_latent = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
+        for i in opt.init:
+            im = load_img(i).to(device)
+            im_latent = model.get_first_stage_encoding(model.encode_first_stage(im))
+            init_latent += im_latent / len(opt.init)
+
     precision_scope = autocast if opt.precision == "autocast" else nullcontext
     with torch.no_grad():
         with precision_scope("cuda"):
@@ -303,8 +325,6 @@ def main():
                         else:  # just standard 1 prompt
                             c = model.get_learned_conditioning(prompts)
 
-                        shape = [opt.channels, opt.height // opt.factor, opt.width // opt.factor]
-
                         if opt.sigma == "old":
                             sigmas = model_wrap.get_sigmas(opt.steps)
                         elif opt.sigma == "karras":
@@ -315,7 +335,15 @@ def main():
                             sigmas = K.sampling.get_sigmas_vp(opt.steps, device=devicestr)
                         else:
                             raise ValueError("sigma option error")
-                        x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]  # for GPU draw
+
+                        if opt.init:
+                            x = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
+                            x += init_latent * opt.init_factor
+                            sigmas *= 1 - opt.init_factor
+                            x += torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
+                        else:
+                            x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]  # for GPU draw
+
                         model_wrap_cfg = CFGDenoiser(model_wrap)
                         extra_args = {"cond": c, "uncond": uc, "cond_scale": opt.scale}
                         samples = sampler(model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
