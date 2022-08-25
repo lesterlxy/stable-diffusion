@@ -5,6 +5,7 @@
   - Include face fixing model from `https://rentry.org/kretard` with memory shuffling so it doesn't eat up vram (running on 10GB)
   - Add weighted prompts from lstein/stable-diffusion
   - Add init images
+  - Add clip interrogator from `https://colab.research.google.com/github/pharmapsychotic/clip-interrogator`
 - img2img
   - Has k-diffusers
   - Not a priority
