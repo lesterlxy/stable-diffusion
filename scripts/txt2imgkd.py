@@ -338,6 +338,8 @@ def main():
     parser.add_argument("--skip-normalize", action="store_true", help="normalize prompt weight")
     parser.add_argument("-i", "--init", action="append", help="init images")
     parser.add_argument("--init-factor", type=float, default=0.8, help="strength of the init image, 0.0-1.0")
+    parser.add_argument("--init-vc", action="store_true", help="variance correction")
+    parser.add_argument("--init-vc-strength", type=float, default=1.0, help="variance correction strength, 0.0-1.0 recommended")
     parser.add_argument("--interrogate", action="store_true", help="interrogate init images to enhance prompt")
     parser.add_argument("--caption", action="store_true", help="use interrogated caption")
     parser.add_argument("--prefix", action="store_true", help="use interrogated prompt as prefix (default behavior suffix)")
@@ -345,6 +347,7 @@ def main():
     assert opt.width % 32 == 0, f"width {opt.width} not a multiple of 32, try {opt.width - (opt.width % 32)}"
     assert opt.height % 32 == 0, f"height {opt.height} not a multiple of 32, try {opt.height - (opt.height % 32)}"
     assert 0.0 <= opt.init_factor <= 1.0, "can only work with init_factor in [0.0, 1.0]"
+    assert 0.0 <= opt.init_vc_strength, "can only work with init_vc_min in [0.0, inf]"
 
     if opt.square:
         opt.height = 640
@@ -480,11 +483,40 @@ def main():
     shape = [opt.channels, opt.height // opt.factor, opt.width // opt.factor]
     init_latent = None
     if opt.init:
-        init_latent = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
-        for i in opt.init:
-            im = load_img(i, opt.width, opt.height).to(device)
-            im_latent = model.get_first_stage_encoding(model.encode_first_stage(im))
-            init_latent += im_latent / len(opt.init)
+        init_dirs = [i for i in opt.init if os.path.isdir(i)]
+        opt.init = [i for i in opt.init if not os.path.isdir(i)]
+        for d in init_dirs:
+            files = os.listdir(d)
+            files = [f for f in files if f.endswith((".jpg", ".png"))]
+            files = [os.path.join(d, f) for f in files]
+            opt.init += files
+
+        assert len(opt.init) > 0, "No valid init images found"
+
+        if opt.init_vc and len(opt.init) > 1:
+            init_array = np.zeros([len(opt.init), opt.n_samples, *shape])  # accumulate in RAM
+            for idx, i in enumerate(opt.init):
+                im = load_img(i, opt.width, opt.height).to(device)
+                im_latent = model.get_first_stage_encoding(model.encode_first_stage(im))
+                im_latent = im_latent.detach().cpu().numpy()
+                init_array[idx] = im_latent.copy()
+            del im_latent
+            init_latent = init_array.mean(0)
+            init_vc_mask = init_array.std(0)
+            init_vc_mask *= opt.init_vc_strength * opt.init_factor
+            del init_array
+            gc.collect()
+            torch.cuda.empty_cache()
+            init_latent = torch.from_numpy(init_latent).half().to(device)
+            init_vc_mask = torch.from_numpy(init_vc_mask).half().to(device)
+            print(f"Using variance correction of min {init_vc_mask.min()}, mean {init_vc_mask.mean()}, median {init_vc_mask.median()}, max {init_vc_mask.max()}")
+        else:
+            init_latent = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
+            for i in opt.init:
+                im = load_img(i, opt.width, opt.height).to(device)
+                im_latent = model.get_first_stage_encoding(model.encode_first_stage(im))
+                init_latent += im_latent / len(opt.init)
+        print(f"Init factor {opt.init_factor}")
 
     precision_scope = autocast if opt.precision == "autocast" else nullcontext
     with torch.no_grad():
@@ -541,9 +573,15 @@ def main():
 
                         if opt.init:
                             x = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
-                            x += init_latent * opt.init_factor
-                            sigmas *= 1 - opt.init_factor
-                            x += torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
+                            if opt.init_vc:
+                                x += torch.mul(init_latent, opt.init_factor)
+                                x += torch.mul(torch.randn([opt.n_samples, *shape], device=device), (sigmas[0] * (1 - opt.init_factor)) + init_vc_mask)  # increase noise to compensate
+                                sigmas *= ((sigmas[0] * (1 - opt.init_factor)) + init_vc_mask.max()) / sigmas[0]
+
+                            else:
+                                sigmas *= 1 - opt.init_factor
+                                x += init_latent * opt.init_factor
+                                x += torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
                         else:
                             x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]  # for GPU draw
 
