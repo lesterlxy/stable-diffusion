@@ -4,7 +4,8 @@
   - Added more command line options
   - Include face fixing model from `https://rentry.org/kretard` with memory shuffling so it doesn't eat up vram (running on 10GB)
   - Add weighted prompts from lstein/stable-diffusion
-  - Add init images
+  - Add multiple init images and init image directory
+  - Add variance correction in latent space when using multiple init images
   - Add clip interrogator from `https://colab.research.google.com/github/pharmapsychotic/clip-interrogator`
 - img2img
   - Has k-diffusers
