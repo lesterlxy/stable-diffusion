@@ -41,6 +41,18 @@ barstyle = " .oO"
 
 
 def draw_umap(mapper, title=""):
+    """
+    Plots the umap mapper with matplotlib
+
+    Arguments
+    ---------
+    mapper : umap mapper object
+        umap mapper object
+    
+    Returns
+    -------
+    None
+    """
     u = mapper.embedding_
     n_components = len(u[0])
     fig = plt.figure()
@@ -82,10 +94,21 @@ class GGWrap:
 
 def split_weighted_subprompts(text):
     """
-    grabs all text up to the first occurrence of ':'
+    Grabs all text up to the first occurrence of ':'
     uses the grabbed text as a sub-prompt, and takes the value following ':' as weight
     if ':' has no value defined, defaults to 1.0
-    repeats until no text remaining
+    
+    Parameters
+    ----------
+    text : str
+        the prompt string to be parsed
+    
+    Returns
+    -------
+    List[str]
+        list of subprompts
+    List[float]
+        list of weights associated with the subprompts
     """
     remaining = len(text)
     prompts = []
