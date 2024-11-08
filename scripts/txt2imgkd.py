@@ -168,7 +168,19 @@ def load_model_from_config(config, ckpt, verbose=False):
 
 
 def get_sample_sigma(a, ci=0.99):
-    "Estimate sigma of sample"
+    """
+    Estimate sigma of sample
+    
+    Parameters
+    ----------
+    a : array_like
+        the sample matrix
+    
+    Returns
+    -------
+    float
+        the sigma of the sample matrix
+    """
     alpha = (1 - ci) / 2
     N = a.shape[0]
     S2 = a.var(0, ddof=1).max()  # Sample variance
