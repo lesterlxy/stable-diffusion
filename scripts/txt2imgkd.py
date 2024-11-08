@@ -83,6 +83,18 @@ class GGWrap:
         self.gg = GFPGANer(model_path=model_path, upscale=1, arch="clean", channel_multiplier=2, bg_upsampler=None)
 
     def to(self, device):
+        """
+        Load the model into specific device's memory
+
+        Arguments
+        ---------
+        device
+            device to be loaded to
+        
+        Returns
+        -------
+        None
+        """
         self.gg.gfpgan.to(device)
         self.gg.face_helper.face_parse.to(device)
         self.gg.face_helper.face_det.to(device)
@@ -196,7 +208,7 @@ def get_sample_sigma(a, ci=0.99):
     
     Parameters
     ----------
-    a : array_like
+    a : np.ndarray
         the sample matrix
     
     Returns
@@ -367,7 +379,7 @@ class Interrogator:
 
         Arguments
         ---------
-        image : array_like
+        image : np.ndarray
             image to be interrogated
         
         Returns
