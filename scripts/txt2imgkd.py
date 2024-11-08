@@ -570,7 +570,7 @@ def main():
         for i in opt.init:
             print(f"Interrogating {i} ...")
             im = Image.open(i).convert("RGB")
-            c, m = inter.interrogate(im)
+            c, m = inter.interrogate(im) # interrogate into caption, modifiers
             m = m.split(",")
             int_caps.append(c)
             int_mods += m
@@ -579,7 +579,7 @@ def main():
         int_mods = ", ".join(int_mods)
         int_caps = list(dict.fromkeys(int_caps))
         int_caps = ", ".join(int_caps)
-        del inter
+        del inter # save memory on memory-starved systems
         gc.collect()
         torch.cuda.empty_cache()
         print(f"Interrogated captions: {int_caps}")
@@ -625,6 +625,7 @@ def main():
                 vec_len = opt.n_samples * np.prod(shape)
                 init_vecs = np.reshape(init_array, (len(opt.init), vec_len))
                 ndim = len(init_vecs) - 2 if opt.init_umap_nd > (len(init_vecs) - 2) else opt.init_umap_nd
+                # initialize mapper with initial vectors
                 mapper = umap.UMAP(random_state=42, n_components=ndim, n_neighbors=opt.init_umap_nnb).fit(init_vecs)
 
                 init_latent = mapper.inverse_transform(mapper.embedding_.mean(0).reshape(1, -1))
