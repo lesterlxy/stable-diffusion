@@ -213,6 +213,19 @@ def get_sample_sigma(a, ci=0.99):
 
 
 def sanitize_prompt(p) -> str:
+    """
+    Sanitize prompts
+
+    Arguments
+    ---------
+    p : str
+        prompt string
+    
+    Returns
+    -------
+    str
+        sanitized string
+    """
     p = p.split(",")
     p = [i.strip() for i in p]
     p = [i for i in p if i]
@@ -349,6 +362,21 @@ class Interrogator:
         return caption[0]
 
     def interrogate(self, image):
+        """
+        Interrogate the image with BLIP and return the captions and modifiers.
+
+        Arguments
+        ---------
+        image : array_like
+            image to be interrogated
+        
+        Returns
+        -------
+        caption: str
+            the interrogated caption
+        modifiers : str
+            the interrogated modifiers
+        """
         caption = self.generate_caption(image)
 
         table = []
