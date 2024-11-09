@@ -45,18 +45,11 @@ GFPGAN_dir = "./src/GFPGAN"
 barstyle = " .oO"
 
 
-def draw_umap(mapper, title=""):
-    """
-    Plots the umap mapper with matplotlib
+def draw_umap(mapper, title="") -> None:
+    """Plots the UMAP mapper with matplotlib.
 
-    Arguments
-    ---------
-    mapper : umap mapper object
-        umap mapper object
-
-    Returns
-    -------
-    None
+    Args:
+        mapper: UMAP mapper object.
     """
     u = mapper.embedding_
     n_components = len(u[0])
