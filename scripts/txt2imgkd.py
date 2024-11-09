@@ -48,7 +48,7 @@ def draw_umap(mapper, title=""):
     ---------
     mapper : umap mapper object
         umap mapper object
-    
+
     Returns
     -------
     None
@@ -76,7 +76,7 @@ class GGWrap:
     ----------
     gg : GFPGAN
         the wrapped GFPGAN object
-    
+
     Methods
     -------
     __init__
@@ -86,18 +86,27 @@ class GGWrap:
     to
         loads the model into specific device memory
     """
+
     def __init__(self):
         self.load_GFPGAN()
 
     def load_GFPGAN(self):
         model_name = "GFPGANv1.3"
-        model_path = os.path.join(GFPGAN_dir, "experiments/pretrained_models", model_name + ".pth")
+        model_path = os.path.join(
+            GFPGAN_dir, "experiments/pretrained_models", model_name + ".pth"
+        )
         if not os.path.isfile(model_path):
             raise Exception("GFPGAN model not found at path " + model_path)
 
         sys.path.append(os.path.abspath(GFPGAN_dir))
 
-        self.gg = GFPGANer(model_path=model_path, upscale=1, arch="clean", channel_multiplier=2, bg_upsampler=None)
+        self.gg = GFPGANer(
+            model_path=model_path,
+            upscale=1,
+            arch="clean",
+            channel_multiplier=2,
+            bg_upsampler=None,
+        )
 
     def to(self, device):
         """
@@ -107,7 +116,7 @@ class GGWrap:
         ---------
         device
             device to be loaded to
-        
+
         Returns
         -------
         None
@@ -117,7 +126,9 @@ class GGWrap:
         self.gg.face_helper.face_det.to(device)
 
     def enhance(self, x):
-        _, _, restored_img = self.gg.enhance(x, has_aligned=False, only_center_face=False, paste_back=True)
+        _, _, restored_img = self.gg.enhance(
+            x, has_aligned=False, only_center_face=False, paste_back=True
+        )
         return restored_img
 
 
@@ -126,12 +137,12 @@ def split_weighted_subprompts(text):
     Grabs all text up to the first occurrence of ':'
     uses the grabbed text as a sub-prompt, and takes the value following ':' as weight
     if ':' has no value defined, defaults to 1.0
-    
+
     Parameters
     ----------
     text : str
         the prompt string to be parsed
-    
+
     Returns
     -------
     List[str]
@@ -159,7 +170,9 @@ def split_weighted_subprompts(text):
                 try:
                     weight = float(text[:idx])
                 except:  # couldn't treat as float
-                    print(f"Warning: '{text[:idx]}' is not a value, are you missing a space?")
+                    print(
+                        f"Warning: '{text[:idx]}' is not a value, are you missing a space?"
+                    )
                     weight = 1.0
             else:  # no value found
                 weight = 1.0
@@ -190,7 +203,11 @@ def load_img(path, target_w, target_h, verbose=False, warning=True):
         print(f"loaded input image of size ({w}, {h}) from {path}")
     if w != target_w or h != target_h:
         if warning:
-            print(color.Fore.RED + f"mismatch with target size ({target_w}, {target_h}), resizing" + color.Fore.RESET)
+            print(
+                color.Fore.RED
+                + f"mismatch with target size ({target_w}, {target_h}), resizing"
+                + color.Fore.RESET
+            )
         image = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
         w, h = image.size
     image = np.array(image).astype(np.float32) / 255.0
@@ -222,12 +239,12 @@ def load_model_from_config(config, ckpt, verbose=False):
 def get_sample_sigma(a, ci=0.99):
     """
     Estimate sigma of sample
-    
+
     Parameters
     ----------
     a : np.ndarray
         the sample matrix
-    
+
     Returns
     -------
     float
@@ -249,7 +266,7 @@ def sanitize_prompt(p) -> str:
     ---------
     p : str
         prompt string
-    
+
     Returns
     -------
     str
@@ -286,6 +303,7 @@ class Interrogator:
         blip_image_eval_size : int, optional
             size to resample image to before interrogation (default is 384)
         """
+
         def load_list(filename):
             with open(filename, "r", encoding="utf-8", errors="replace") as f:
                 items = [line.strip() for line in f.readlines()]
@@ -338,9 +356,7 @@ class Interrogator:
         self.trending_list.extend(["featured on " + site for site in sites])
         self.trending_list.extend([site + " contest winner" for site in sites])
 
-        self.model_name = (
-            "ViT-L/14"  # only one model for stable diffusion as recommended by pharmapsychotic/clip-interrogator
-        )
+        self.model_name = "ViT-L/14"  # only one model for stable diffusion as recommended by pharmapsychotic/clip-interrogator
         self.model, self.preprocess = clip.load(self.model_name)
         self.model.eval()
         self.model.to(device)
@@ -360,14 +376,19 @@ class Interrogator:
 
         similarity = torch.zeros((1, len(text_array))).to(self.device)
         for i in range(image_features.shape[0]):
-            similarity += (100.0 * image_features[i].unsqueeze(0) @ text_features.T).softmax(dim=-1)
+            similarity += (
+                100.0 * image_features[i].unsqueeze(0) @ text_features.T
+            ).softmax(dim=-1)
         similarity /= image_features.shape[0]
 
         del image_features
 
         top_probs, top_labels = similarity.cpu().topk(top_count, dim=-1)
 
-        return [(text_array[top_labels[0][i].numpy()], (top_probs[0][i].numpy() * 100)) for i in range(top_count)]
+        return [
+            (text_array[top_labels[0][i].numpy()], (top_probs[0][i].numpy() * 100))
+            for i in range(top_count)
+        ]
 
     def get_ranks(self, image_features):
         return [
@@ -383,10 +404,14 @@ class Interrogator:
             transforms.Compose(
                 [
                     transforms.Resize(
-                        (self.blip_image_eval_size, self.blip_image_eval_size), interpolation=InterpolationMode.LANCZOS
+                        (self.blip_image_eval_size, self.blip_image_eval_size),
+                        interpolation=InterpolationMode.LANCZOS,
                     ),
                     transforms.ToTensor(),
-                    transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+                    transforms.Normalize(
+                        (0.48145466, 0.4578275, 0.40821073),
+                        (0.26862954, 0.26130258, 0.27577711),
+                    ),
                 ]
             )(image)
             .unsqueeze(0)
@@ -395,7 +420,9 @@ class Interrogator:
         )
 
         with torch.no_grad():
-            caption = self.blip_model.generate(gpu_image, sample=False, num_beams=3, max_length=20, min_length=5)
+            caption = self.blip_model.generate(
+                gpu_image, sample=False, num_beams=3, max_length=20, min_length=5
+            )
         return caption[0]
 
     def interrogate(self, image):
@@ -406,7 +433,7 @@ class Interrogator:
         ---------
         image : np.ndarray
             image to be interrogated
-        
+
         Returns
         -------
         caption: str
@@ -450,13 +477,17 @@ class Interrogator:
         table.append(row)
 
         print(
-            pd.DataFrame(table, columns=["Model", "Medium", "Trending", "Movement", "Flavors"])
+            pd.DataFrame(
+                table, columns=["Model", "Medium", "Trending", "Movement", "Flavors"]
+            )
         )  # removed artists column
 
         flaves = ", ".join([f"{x[0]}" for x in bests[4]])
         medium = bests[0][0][0]
         if caption.startswith(medium):
-            modifiers = f"{bests[1][0][0]}, {bests[2][0][0]}, {bests[3][0][0]}, {flaves}"
+            modifiers = (
+                f"{bests[1][0][0]}, {bests[2][0][0]}, {bests[3][0][0]}, {flaves}"
+            )
         else:
             modifiers = f"{medium} {bests[1][0][0]}, {bests[2][0][0]}, {bests[3][0][0]}, {flaves}"
         print(f"{caption}, {modifiers}")
@@ -473,14 +504,27 @@ def get_parser() -> argparse.ArgumentParser:
         default="a painting of a virus monster playing guitar",
         help="the prompt to render",
     )
-    p.add_argument("--outdir", type=str, nargs="?", help="dir to write results to", default="outputs/txt2img-samples")
+    p.add_argument(
+        "--outdir",
+        type=str,
+        nargs="?",
+        help="dir to write results to",
+        default="outputs/txt2img-samples",
+    )
     p.add_argument(
         "--skip_grid",
         action="store_true",
-        help="Do not save a grid, only individual samples." "Helpful when evaluating lots of samples",
+        help="Do not save a grid, only individual samples."
+        "Helpful when evaluating lots of samples",
     )
-    p.add_argument("--skip_save", action="store_true", help="do not save individual samples. For speed measurements.")
-    p.add_argument("-N", "--steps", type=int, default=50, help="number of sampling steps")
+    p.add_argument(
+        "--skip_save",
+        action="store_true",
+        help="do not save individual samples. For speed measurements.",
+    )
+    p.add_argument(
+        "-N", "--steps", type=int, default=50, help="number of sampling steps"
+    )
     p.add_argument("--kl", action="store_true", help="use k-lms sampling")
     p.add_argument("--ke", action="store_true", help="use k-euler sampling (default)")
     p.add_argument("--kea", action="store_true", help="use k-euler-ancestral sampling")
@@ -489,19 +533,32 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--kd", action="store_true", help="use k-dpm-2 sampling")
     p.add_argument("--kda", action="store_true", help="use k-dpm-2-ancestral sampling")
     p.add_argument("--leaked", action="store_true", help="uses the leaked v1.3 model")
-    p.add_argument("--fixed_code", action="store_true", help="if enabled, uses the same starting code across samples ")
+    p.add_argument(
+        "--fixed_code",
+        action="store_true",
+        help="if enabled, uses the same starting code across samples ",
+    )
     p.add_argument("--n-iter", type=int, default=1, help="sample this often")
-    p.add_argument("-H", "--height", type=int, default=512, help="image height, in pixel space")
-    p.add_argument("-W", "--width", type=int, default=512, help="image width, in pixel space")
+    p.add_argument(
+        "-H", "--height", type=int, default=512, help="image height, in pixel space"
+    )
+    p.add_argument(
+        "-W", "--width", type=int, default=512, help="image width, in pixel space"
+    )
     p.add_argument("--square", action="store_true", help="size preset")
     p.add_argument("--portrait", action="store_true", help="size preset")
     p.add_argument("--landscape", action="store_true", help="size preset")
     p.add_argument("--channels", type=int, default=4, help="latent channels")
     p.add_argument("--factor", type=int, default=8, help="downsampling factor")
     p.add_argument(
-        "--n-samples", type=int, default=1, help="how many samples to produce for each given prompt. A.k.a. batch size"
+        "--n-samples",
+        type=int,
+        default=1,
+        help="how many samples to produce for each given prompt. A.k.a. batch size",
     )
-    p.add_argument("--n-rows", type=int, default=0, help="rows in the grid (default: n_samples)")
+    p.add_argument(
+        "--n-rows", type=int, default=0, help="rows in the grid (default: n_samples)"
+    )
     p.add_argument(
         "-C",
         "--scale",
@@ -509,7 +566,9 @@ def get_parser() -> argparse.ArgumentParser:
         default=7.5,
         help="cfg scale - unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))",
     )
-    p.add_argument("--from-file", type=str, help="if specified, load prompts from this file")
+    p.add_argument(
+        "--from-file", type=str, help="if specified, load prompts from this file"
+    )
     p.add_argument(
         "--config",
         type=str,
@@ -517,31 +576,61 @@ def get_parser() -> argparse.ArgumentParser:
         help="path to config which constructs model",
     )
     p.add_argument(
-        "--ckpt", type=str, default="models/ldm/stable-diffusion-v1-4/model.ckpt", help="path to checkpoint of model"
+        "--ckpt",
+        type=str,
+        default="models/ldm/stable-diffusion-v1-4/model.ckpt",
+        help="path to checkpoint of model",
     )
-    p.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
+    p.add_argument(
+        "--seed", type=int, default=42, help="the seed (for reproducible sampling)"
+    )
     p.add_argument("--random", action="store_true", help="randomize seed")
     p.add_argument(
-        "--precision", type=str, help="evaluate at this precision", choices=["full", "autocast"], default="autocast"
+        "--precision",
+        type=str,
+        help="evaluate at this precision",
+        choices=["full", "autocast"],
+        default="autocast",
     )
     p.add_argument(
-        "--sigma", type=str, help="sigma scheduler", choices=["old", "karras", "exp", "vp"], default="karras"
+        "--sigma",
+        type=str,
+        help="sigma scheduler",
+        choices=["old", "karras", "exp", "vp"],
+        default="karras",
     )
     p.add_argument("--four", action="store_true", help="grid")
     p.add_argument("--six", action="store_true", help="grid")
     p.add_argument("--nine", action="store_true", help="grid")
     p.add_argument("--twelve", action="store_true", help="grid")
     p.add_argument("--face", action="store_true", help="gfpgan face fixer")
-    p.add_argument("--skip-normalize", action="store_true", help="normalize prompt weight")
+    p.add_argument(
+        "--skip-normalize", action="store_true", help="normalize prompt weight"
+    )
     p.add_argument("-i", "--init", action="append", help="init images")
-    p.add_argument("--init-strength", type=float, default=0.8, help="strength of the init image, 0.0-1.0")
+    p.add_argument(
+        "--init-strength",
+        type=float,
+        default=0.8,
+        help="strength of the init image, 0.0-1.0",
+    )
     p.add_argument("--init-vc", action="store_true", help="variance correction")
-    p.add_argument("--init-umap", action="store_true", help="use umap to find the common features")
+    p.add_argument(
+        "--init-umap", action="store_true", help="use umap to find the common features"
+    )
     p.add_argument("--init-umap-nnb", type=int, default=16, help="n nearest neighbors")
     p.add_argument("--init-umap-nd", type=int, default=8, help="umap components")
-    p.add_argument("--interrogate", action="store_true", help="interrogate init images to enhance prompt")
+    p.add_argument(
+        "--interrogate",
+        action="store_true",
+        help="interrogate init images to enhance prompt",
+    )
     p.add_argument("--caption", action="store_true", help="use interrogated caption")
-    p.add_argument("--prefix", action="store_true", help="use interrogated prompt as prefix (default behavior suffix)")
+    p.add_argument(
+        "--prefix",
+        action="store_true",
+        help="use interrogated prompt as prefix (default behavior suffix)",
+    )
     return p
 
 
@@ -550,9 +639,15 @@ def main():
 
     parser = get_parser()
     opt = parser.parse_args()
-    assert opt.width % 32 == 0, f"width {opt.width} not a multiple of 32, try {opt.width - (opt.width % 32)}"
-    assert opt.height % 32 == 0, f"height {opt.height} not a multiple of 32, try {opt.height - (opt.height % 32)}"
-    assert 0.0 <= opt.init_strength <= 1.0, "can only work with init_strength in [0.0, 1.0]"
+    assert (
+        opt.width % 32 == 0
+    ), f"width {opt.width} not a multiple of 32, try {opt.width - (opt.width % 32)}"
+    assert (
+        opt.height % 32 == 0
+    ), f"height {opt.height} not a multiple of 32, try {opt.height - (opt.height % 32)}"
+    assert (
+        0.0 <= opt.init_strength <= 1.0
+    ), "can only work with init_strength in [0.0, 1.0]"
     # quick size options
     if opt.square:
         opt.height = 640
@@ -584,7 +679,11 @@ def main():
             opt.n_rows = 4
 
     if opt.leaked:
-        print(color.Fore.YELLOW + "Falling back to leaked v1.3 model..." + color.Fore.RESET)
+        print(
+            color.Fore.YELLOW
+            + "Falling back to leaked v1.3 model..."
+            + color.Fore.RESET
+        )
         opt.ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
 
     if opt.random:
@@ -643,7 +742,12 @@ def main():
         print("Sampler: " + color.Fore.CYAN + "k-euler" + color.Fore.RESET)
     else:
         sampler = K.sampling.sample_euler_ancestral
-        print("Sampler: " + color.Fore.CYAN + "default (k-euler-ancestral)" + color.Fore.RESET)
+        print(
+            "Sampler: "
+            + color.Fore.CYAN
+            + "default (k-euler-ancestral)"
+            + color.Fore.RESET
+        )
 
     print(
         "Steps: {}, CFG: {}, output size: {}x{}, total iterations: {}".format(
@@ -670,7 +774,7 @@ def main():
         for i in opt.init:
             print(f"Interrogating {i} ...")
             im = Image.open(i).convert("RGB")
-            c, m = inter.interrogate(im) # interrogate into caption, modifiers
+            c, m = inter.interrogate(im)  # interrogate into caption, modifiers
             m = m.split(",")
             int_caps.append(c)
             int_mods += m
@@ -679,7 +783,7 @@ def main():
         int_mods = ", ".join(int_mods)
         int_caps = list(dict.fromkeys(int_caps))
         int_caps = ", ".join(int_caps)
-        del inter # save memory on memory-starved systems
+        del inter  # save memory on memory-starved systems
         gc.collect()
         torch.cuda.empty_cache()
         print(f"Interrogated captions: {int_caps}")
@@ -712,7 +816,15 @@ def main():
         if opt.init_vc and len(opt.init) > 1:
             init_array = np.zeros([len(opt.init), opt.n_samples, *shape])
             for idx, i in enumerate(
-                (pbar := tqdm(opt.init, desc="", dynamic_ncols=True, colour="green", ascii=barstyle))
+                (
+                    pbar := tqdm(
+                        opt.init,
+                        desc="",
+                        dynamic_ncols=True,
+                        colour="green",
+                        ascii=barstyle,
+                    )
+                )
             ):
                 pbar.set_description(f"{i}")
                 im = load_img(i, opt.width, opt.height).to(device)
@@ -724,11 +836,19 @@ def main():
                 print(color.Fore.YELLOW + "Using umap" + color.Fore.RESET)
                 vec_len = opt.n_samples * np.prod(shape)
                 init_vecs = np.reshape(init_array, (len(opt.init), vec_len))
-                ndim = len(init_vecs) - 2 if opt.init_umap_nd > (len(init_vecs) - 2) else opt.init_umap_nd
+                ndim = (
+                    len(init_vecs) - 2
+                    if opt.init_umap_nd > (len(init_vecs) - 2)
+                    else opt.init_umap_nd
+                )
                 # initialize mapper with initial vectors
-                mapper = umap.UMAP(random_state=42, n_components=ndim, n_neighbors=opt.init_umap_nnb).fit(init_vecs)
+                mapper = umap.UMAP(
+                    random_state=42, n_components=ndim, n_neighbors=opt.init_umap_nnb
+                ).fit(init_vecs)
 
-                init_latent = mapper.inverse_transform(mapper.embedding_.mean(0).reshape(1, -1))
+                init_latent = mapper.inverse_transform(
+                    mapper.embedding_.mean(0).reshape(1, -1)
+                )
                 init_latent = init_latent[0]
                 init_latent = init_latent.reshape(opt.n_samples, *shape)
                 print(color.Fore.YELLOW + f"Done with dim {ndim}" + color.Fore.RESET)
@@ -736,7 +856,11 @@ def main():
                 del mapper
             else:
                 if len(opt.init) > 25:
-                    print(color.Fore.CYAN + "Using median for large init size" + color.Fore.RESET)
+                    print(
+                        color.Fore.CYAN
+                        + "Using median for large init size"
+                        + color.Fore.RESET
+                    )
                     init_latent = np.median(init_array, axis=0)
                 else:
                     init_latent = init_array.mean(0)
@@ -750,9 +874,15 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
             init_latent = torch.from_numpy(init_latent).half().to(device)
-            print(color.Fore.YELLOW + f"Using sigma correction of {vc_sigma_scaled}" + color.Fore.RESET)
+            print(
+                color.Fore.YELLOW
+                + f"Using sigma correction of {vc_sigma_scaled}"
+                + color.Fore.RESET
+            )
         else:
-            init_latent = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
+            init_latent = torch.zeros(
+                [opt.n_samples, *shape], device=device
+            )  # for GPU draw
             for i in opt.init:
                 im = load_img(i, opt.width, opt.height).to(device)
                 im_latent = model.get_first_stage_encoding(model.encode_first_stage(im))
@@ -764,8 +894,20 @@ def main():
         with precision_scope("cuda"):
             with model.ema_scope():
                 all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling", dynamic_ncols=True, colour="green", ascii=barstyle):
-                    for prompts in tqdm(data, desc="data", dynamic_ncols=True, colour="green", ascii=barstyle):
+                for n in trange(
+                    opt.n_iter,
+                    desc="Sampling",
+                    dynamic_ncols=True,
+                    colour="green",
+                    ascii=barstyle,
+                ):
+                    for prompts in tqdm(
+                        data,
+                        desc="data",
+                        dynamic_ncols=True,
+                        colour="green",
+                        ascii=barstyle,
+                    ):
                         uc = None
                         if opt.scale != 1.0:
                             uc = model.get_learned_conditioning(batch_size * [""])
@@ -781,7 +923,12 @@ def main():
                                 prompts[0] = p + ", " + prompts[0]
                             else:
                                 prompts[0] = prompts[0] + ", " + p
-                        tqdm.write("Prompt: " + color.Fore.MAGENTA + f"{prompts[0]}" + color.Fore.RESET)
+                        tqdm.write(
+                            "Prompt: "
+                            + color.Fore.MAGENTA
+                            + f"{prompts[0]}"
+                            + color.Fore.RESET
+                        )
 
                         # weighted sub-prompts
                         subprompts, weights = split_weighted_subprompts(prompts[0])
@@ -796,7 +943,11 @@ def main():
                                 weight = weights[i]
                                 if not opt.skip_normalize:
                                     weight = weight / totalWeight
-                                c = torch.add(c, model.get_learned_conditioning(subprompts[i]), alpha=weight)
+                                c = torch.add(
+                                    c,
+                                    model.get_learned_conditioning(subprompts[i]),
+                                    alpha=weight,
+                                )
                         else:  # just standard 1 prompt
                             tqdm.write("Regular subprompt detected")
                             c = model.get_learned_conditioning(prompts)
@@ -804,45 +955,68 @@ def main():
                         if opt.sigma == "old":
                             sigmas = model_wrap.get_sigmas(opt.steps)
                         elif opt.sigma == "karras":
-                            sigmas = K.sampling.get_sigmas_karras(opt.steps, sigma_min, sigma_max, device=devicestr)
+                            sigmas = K.sampling.get_sigmas_karras(
+                                opt.steps, sigma_min, sigma_max, device=devicestr
+                            )
                         elif opt.sigma == "exp":
                             sigmas = K.sampling.get_sigmas_exponential(
                                 opt.steps, sigma_min, sigma_max, device=devicestr
                             )
                         elif opt.sigma == "vp":
-                            sigmas = K.sampling.get_sigmas_vp(opt.steps, device=devicestr)
+                            sigmas = K.sampling.get_sigmas_vp(
+                                opt.steps, device=devicestr
+                            )
                         else:
                             raise ValueError("sigma option error")
 
                         if opt.init:
-                            x = torch.zeros([opt.n_samples, *shape], device=device)  # for GPU draw
+                            x = torch.zeros(
+                                [opt.n_samples, *shape], device=device
+                            )  # for GPU draw
                             if opt.init_vc:
                                 x += torch.mul(init_latent, opt.init_strength)
                                 x += torch.mul(
                                     torch.randn([opt.n_samples, *shape], device=device),
                                     sigmas[0] * (1 - opt.init_strength),
                                 )
-                                sigmas *= ((sigmas[0] * (1 - opt.init_strength)) + vc_sigma_scaled) / sigmas[
+                                sigmas *= (
+                                    (sigmas[0] * (1 - opt.init_strength))
+                                    + vc_sigma_scaled
+                                ) / sigmas[
                                     0
                                 ]  # compensate for noise in init
                             else:
                                 sigmas *= 1 - opt.init_strength
                                 x += init_latent * opt.init_strength
-                                x += torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
+                                x += (
+                                    torch.randn([opt.n_samples, *shape], device=device)
+                                    * sigmas[0]
+                                )
                         else:
-                            x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]  # for GPU draw
+                            x = (
+                                torch.randn([opt.n_samples, *shape], device=device)
+                                * sigmas[0]
+                            )  # for GPU draw
 
                         model_wrap_cfg = CFGDenoiser(model_wrap)
                         extra_args = {"cond": c, "uncond": uc, "cond_scale": opt.scale}
                         samples = sampler(
-                            model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process
+                            model_wrap_cfg,
+                            x,
+                            sigmas,
+                            extra_args=extra_args,
+                            disable=not accelerator.is_main_process,
                         )
                         x_samples = model.decode_first_stage(samples)
-                        x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                        x_samples = torch.clamp(
+                            (x_samples + 1.0) / 2.0, min=0.0, max=1.0
+                        )
 
                         if not opt.skip_save:
                             for x_samp in x_samples:
-                                x_samp = 255.0 * rearrange(x_samp.cpu().numpy(), "c h w -> h w c")
+                                x_samp = 255.0 * rearrange(
+                                    x_samp.cpu().numpy(), "c h w -> h w c"
+                                )
                                 x_samp = x_samp.astype(np.uint8)
 
                                 if opt.face and GFPGAN is not None:
@@ -858,7 +1032,9 @@ def main():
                                     model.to("cuda")
                                     tqdm.write("Face fixed!")
 
-                                Image.fromarray(x_samp).save(os.path.join(sample_path, f"{base_count:05}.png"))
+                                Image.fromarray(x_samp).save(
+                                    os.path.join(sample_path, f"{base_count:05}.png")
+                                )
                                 base_count += 1
 
                         if not opt.skip_grid:
@@ -872,10 +1048,14 @@ def main():
 
                     # to image
                     grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
-                    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f"grid-{grid_count:04}.png"))
+                    Image.fromarray(grid.astype(np.uint8)).save(
+                        os.path.join(outpath, f"grid-{grid_count:04}.png")
+                    )
                     grid_count += 1
 
-    print(f"Your samples are ready and waiting for you here: \n{outpath} \n" f" \nEnjoy.")
+    print(
+        f"Your samples are ready and waiting for you here: \n{outpath} \n" f" \nEnjoy."
+    )
 
 
 if __name__ == "__main__":
