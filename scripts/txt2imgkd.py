@@ -8,14 +8,17 @@ import random
 import sys
 from contextlib import nullcontext
 from itertools import islice
+from typing import List, Optional, Tuple
 
 import accelerate
-import clip
 import colorama as color
 import k_diffusion as K
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import PIL
+import PIL.Image
+import PIL.PngImagePlugin
 import scipy
 import torch
 import torch.nn as nn
@@ -23,7 +26,6 @@ import umap
 import umap.plot
 from einops import rearrange
 from gfpgan import GFPGANer
-from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 from PIL import Image
 from pytorch_lightning import seed_everything
@@ -34,6 +36,9 @@ from torchvision.transforms.functional import InterpolationMode
 from torchvision.utils import make_grid
 from tqdm import tqdm, trange
 from transformers import logging
+
+import clip
+from ldm.util import instantiate_from_config
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 GFPGAN_dir = "./src/GFPGAN"
@@ -69,22 +74,15 @@ def draw_umap(mapper, title=""):
 
 
 class GGWrap:
-    """
-    Wrapper class for GFPGAN
+    """Wrapper class for GFPGAN
 
-    Attributes
-    ----------
-    gg : GFPGAN
-        the wrapped GFPGAN object
+    Attributes:
+        gg: the wrapped GFPGAN object
 
-    Methods
-    -------
-    __init__
-        loads the GFPGAN
-    load_GFPGAN
-        loads the GFPGAN
-    to
-        loads the model into specific device memory
+    Methods:
+        __init__: loads the GFPGAN
+        load_GFPGAN: loads the GFPGAN
+        to: loads the model into specific device memory
     """
 
     def __init__(self):
@@ -108,22 +106,15 @@ class GGWrap:
             bg_upsampler=None,
         )
 
-    def to(self, device):
-        """
-        Load the model into specific device's memory
+    def to(self, device_name : str):
+        """Load the model into specific device's memory
 
-        Arguments
-        ---------
-        device
-            device to be loaded to
-
-        Returns
-        -------
-        None
-        """
-        self.gg.gfpgan.to(device)
-        self.gg.face_helper.face_parse.to(device)
-        self.gg.face_helper.face_det.to(device)
+        Args:
+            device_name (str): device to be loaded to e.g. "cuda", "cpu"
+        """        
+        self.gg.gfpgan.to(device_name)
+        self.gg.face_helper.face_parse.to(device_name)
+        self.gg.face_helper.face_det.to(device_name)
 
     def enhance(self, x):
         _, _, restored_img = self.gg.enhance(
@@ -132,23 +123,16 @@ class GGWrap:
         return restored_img
 
 
-def split_weighted_subprompts(text):
-    """
-    Grabs all text up to the first occurrence of ':'
-    uses the grabbed text as a sub-prompt, and takes the value following ':' as weight
-    if ':' has no value defined, defaults to 1.0
+def split_weighted_subprompts(text: str) -> Tuple[List[str], List[float]]:
+    """Grabs all text up to the first occurrence of ':'.
+    Uses the grabbed text as a sub-prompt, and takes the value following ':' as weight.
+    If ':' has no value defined, defaults to 1.0.
 
-    Parameters
-    ----------
-    text : str
-        the prompt string to be parsed
+    Args:
+        text (str): the prompt string to be parsed
 
-    Returns
-    -------
-    List[str]
-        list of subprompts
-    List[float]
-        list of weights associated with the subprompts
+    Returns:
+        Tuple[List[str], List[float]]: list of subprompts, list of weights associated with the subprompts
     """
     remaining = len(text)
     prompts = []
@@ -163,7 +147,7 @@ def split_weighted_subprompts(text):
             text = text[idx + 1 :]
             # find value for weight
             if " " in text:
-                idx = text.index(" ")  # first occurence
+                idx = text.index(" ")  # first occurrence
             else:  # no space, read to end
                 idx = len(text)
             if idx != 0:
@@ -196,7 +180,21 @@ def chunk(it, size):
     return iter(lambda: tuple(islice(it, size)), ())
 
 
-def load_img(path, target_w, target_h, verbose=False, warning=True):
+def load_img(
+    path: str, target_w: int, target_h: int, verbose=False, warning=True
+) -> torch.Tensor:
+    """Load image into a torch tensor.
+
+    Args:
+        path (str): path to image
+        target_w (int): target width in pixels
+        target_h (int): target height in pixels
+        verbose (bool, optional): print status to console. Defaults to False.
+        warning (bool, optional): print message upon image size mismatch. Defaults to True.
+
+    Returns:
+        torch.Tensor: the image as a torch tensor.
+    """
     image = Image.open(path).convert("RGB")
     w, h = image.size
     if verbose:
@@ -236,46 +234,37 @@ def load_model_from_config(config, ckpt, verbose=False):
     return model
 
 
-def get_sample_sigma(a, ci=0.99):
-    """
-    Estimate sigma of sample
+def get_sample_sigma(a: np.ndarray, ci: float = 0.99) -> float:
+    """Estimate sigma of sample
 
-    Parameters
-    ----------
-    a : np.ndarray
-        the sample matrix
+    Args:
+        a (np.ndarray): Sample array.
+        ci (float, optional): Confidence interval used for estimating the variance. Defaults to 0.99.
 
-    Returns
-    -------
-    float
-        the sigma of the sample matrix
+    Returns:
+        float: The sigma of the sample array.
     """
     alpha = (1 - ci) / 2
     N = a.shape[0]
-    S2 = a.var(0, ddof=1).max()  # Sample variance
+    S2 = a.var(0, ddof=1).max()  # Sample variance, estimate using the max
     S2 = (N - 1) * S2 / scipy.stats.chi2.ppf(alpha, N - 1)  # Upper bound for CI
     S = math.sqrt(S2)  # Std dev
     return S
 
 
-def sanitize_prompt(p) -> str:
-    """
-    Sanitize prompts
+def sanitize_prompt(p: str) -> str:
+    """Sanitize prompt string, removing whitespaces and empty sub-prompts.
 
-    Arguments
-    ---------
-    p : str
-        prompt string
+    Args:
+        p (str): Prompt string.
 
-    Returns
-    -------
-    str
-        sanitized string
-    """
-    p = p.split(",")
-    p = [i.strip() for i in p]
-    p = [i for i in p if i]
-    p = ", ".join(p)
+    Returns:
+        str: Sanitized prompt.
+    """    
+    p_list = p.split(",")
+    p_list = [i.strip() for i in p_list] # remove extra whitespace
+    p_list = [i for i in p_list if i] # remove empty sub-prompts
+    p = ", ".join(p_list)
     return p
 
 
@@ -294,22 +283,19 @@ class CFGDenoiser(nn.Module):
 
 class Interrogator:
     # credit to https://colab.research.google.com/github/pharmapsychotic/clip-interrogator/blob/main/clip_interrogator.ipynb
-    def __init__(self, device, blip_image_eval_size: int = 384):
-        """
-        Arguments
-        ---------
-        device
-            device to load model into
-        blip_image_eval_size : int, optional
-            size to resample image to before interrogation (default is 384)
-        """
+    def __init__(self, device_name: str, blip_image_eval_size: int = 384) -> None:
+        """Initialize BLIP interrogator.
 
+        Args:
+            device_name (str): Device to load model into e.g. "cuda", "cpu"
+            blip_image_eval_size (int, optional): Size to resample image to before interrogation. Defaults to 384.
+        """        
         def load_list(filename):
             with open(filename, "r", encoding="utf-8", errors="replace") as f:
                 items = [line.strip() for line in f.readlines()]
             return items
 
-        self.device = device
+        self.device_name = device_name
 
         # "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth"
         blip_model_url = os.path.join("models", "blip", "model_base_caption.pth")
@@ -323,7 +309,7 @@ class Interrogator:
         )
         self.blip_model.eval()
         self.blip_model.half()
-        self.blip_model.to(device)
+        self.blip_model.to(device_name)
 
         data_path = "./src/clip-interrogator/data/"
         self.artists = load_list(os.path.join(data_path, "artists.txt"))
@@ -359,12 +345,12 @@ class Interrogator:
         self.model_name = "ViT-L/14"  # only one model for stable diffusion as recommended by pharmapsychotic/clip-interrogator
         self.model, self.preprocess = clip.load(self.model_name)
         self.model.eval()
-        self.model.to(device)
+        self.model.to(device_name)
 
     def __del__(self):
         del self.model
         del self.blip_model
-        torch.cuda.empty_cache()
+        torch.cuda.empty_cache()  # ensure memory is cleared
         gc.collect()
 
     def rank(self, image_features, text_array, top_count=1):
@@ -374,7 +360,7 @@ class Interrogator:
             text_features = self.model.encode_text(text_tokens).half()
         text_features /= text_features.norm(dim=-1, keepdim=True)
 
-        similarity = torch.zeros((1, len(text_array))).to(self.device)
+        similarity = torch.zeros((1, len(text_array))).to(self.device_name)
         for i in range(image_features.shape[0]):
             similarity += (
                 100.0 * image_features[i].unsqueeze(0) @ text_features.T
@@ -393,13 +379,13 @@ class Interrogator:
     def get_ranks(self, image_features):
         return [
             self.rank(image_features, self.mediums),
-            # self.rank(image_features, ["by "+artist for artist in self.artists]), # memory boom on 10G
+            # self.rank(image_features, ["by "+artist for artist in self.artists]), # uses too much memory for my 10GB
             self.rank(image_features, self.trending_list),
             self.rank(image_features, self.movements),
             self.rank(image_features, self.flavors, top_count=3),
         ]
 
-    def generate_caption(self, image):
+    def generate_caption(self, image) -> str:
         gpu_image = (
             transforms.Compose(
                 [
@@ -416,7 +402,7 @@ class Interrogator:
             )(image)
             .unsqueeze(0)
             .half()
-            .to(self.device)
+            .to(self.device_name)
         )
 
         with torch.no_grad():
@@ -425,21 +411,14 @@ class Interrogator:
             )
         return caption[0]
 
-    def interrogate(self, image):
-        """
-        Interrogate the image with BLIP and return the captions and modifiers.
+    def interrogate(self, image: PIL.Image.Image) -> Tuple[str, str]:
+        """Interrogate the image with BLIP and return the caption and modifiers.
 
-        Arguments
-        ---------
-        image : np.ndarray
-            image to be interrogated
+        Args:
+            image (PIL.Image.Image): image to be interrogated
 
-        Returns
-        -------
-        caption: str
-            the interrogated caption
-        modifiers : str
-            the interrogated modifiers
+        Returns:
+            Tuple[str, str]: caption, modifiers
         """
         caption = self.generate_caption(image)
 
@@ -459,7 +438,7 @@ class Interrogator:
 
         ranks = self.get_ranks(image_features)
 
-        self.blip_model.to(self.device)
+        self.blip_model.to(self.device_name)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -696,8 +675,8 @@ def main():
 
     config = OmegaConf.load(f"{opt.config}")
 
-    devicestr = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(devicestr)
+    deviceStr = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(deviceStr)
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
@@ -768,12 +747,12 @@ def main():
     int_caps = ""
     int_mods = ""
     if opt.init and opt.interrogate:
-        inter = Interrogator(devicestr, blip_image_eval_size=512)
+        inter = Interrogator(deviceStr, blip_image_eval_size=512)
         int_caps = []
         int_mods = []
         for i in opt.init:
             print(f"Interrogating {i} ...")
-            im = Image.open(i).convert("RGB")
+            im: PIL.Image.Image = Image.open(i).convert("RGB")
             c, m = inter.interrogate(im)  # interrogate into caption, modifiers
             m = m.split(",")
             int_caps.append(c)
@@ -956,15 +935,15 @@ def main():
                             sigmas = model_wrap.get_sigmas(opt.steps)
                         elif opt.sigma == "karras":
                             sigmas = K.sampling.get_sigmas_karras(
-                                opt.steps, sigma_min, sigma_max, device=devicestr
+                                opt.steps, sigma_min, sigma_max, device=deviceStr
                             )
                         elif opt.sigma == "exp":
                             sigmas = K.sampling.get_sigmas_exponential(
-                                opt.steps, sigma_min, sigma_max, device=devicestr
+                                opt.steps, sigma_min, sigma_max, device=deviceStr
                             )
                         elif opt.sigma == "vp":
                             sigmas = K.sampling.get_sigmas_vp(
-                                opt.steps, device=devicestr
+                                opt.steps, device=deviceStr
                             )
                         else:
                             raise ValueError("sigma option error")
