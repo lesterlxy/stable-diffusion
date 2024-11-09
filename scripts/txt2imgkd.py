@@ -261,6 +261,14 @@ class CFGDenoiser(nn.Module):
 class Interrogator:
     # credit to https://colab.research.google.com/github/pharmapsychotic/clip-interrogator/blob/main/clip_interrogator.ipynb
     def __init__(self, device, blip_image_eval_size: int = 384):
+        """
+        Arguments
+        ---------
+        device
+            device to load model into
+        blip_image_eval_size : int, optional
+            size to resample image to before interrogation (default is 384)
+        """
         def load_list(filename):
             with open(filename, "r", encoding="utf-8", errors="replace") as f:
                 items = [line.strip() for line in f.readlines()]
@@ -528,7 +536,7 @@ def main():
     assert opt.width % 32 == 0, f"width {opt.width} not a multiple of 32, try {opt.width - (opt.width % 32)}"
     assert opt.height % 32 == 0, f"height {opt.height} not a multiple of 32, try {opt.height - (opt.height % 32)}"
     assert 0.0 <= opt.init_strength <= 1.0, "can only work with init_strength in [0.0, 1.0]"
-
+    # quick size options
     if opt.square:
         opt.height = 640
         opt.width = 640
@@ -538,7 +546,7 @@ def main():
     elif opt.landscape:
         opt.height = 576
         opt.width = 768
-
+    # quick batch options
     if opt.four:
         opt.n_iter = 4
         opt.n_rows = 2
