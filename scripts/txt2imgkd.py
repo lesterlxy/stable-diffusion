@@ -69,6 +69,23 @@ def draw_umap(mapper, title=""):
 
 
 class GGWrap:
+    """
+    Wrapper class for GFPGAN
+
+    Attributes
+    ----------
+    gg : GFPGAN
+        the wrapped GFPGAN object
+    
+    Methods
+    -------
+    __init__
+        loads the GFPGAN
+    load_GFPGAN
+        loads the GFPGAN
+    to
+        loads the model into specific device memory
+    """
     def __init__(self):
         self.load_GFPGAN()
 
